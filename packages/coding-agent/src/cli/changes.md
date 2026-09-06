@@ -1,5 +1,23 @@
 # changes
 
+## 2026-09-06 - Advertise a2a-server in CLI help
+
+### What changed
+
+- `packages/coding-agent/src/cli/args.ts`: adds a `Commands:` row for `${APP_NAME} a2a-server [--listen <url>]` ("Serve the agent over the A2A (Agent2Agent) protocol") after the app-server daemon row, and an `Examples:` line `${APP_NAME} a2a-server --listen http://127.0.0.1:41241` beside the app-server examples. Parsing is unchanged; the subcommand is claimed in `main.ts` before `parseArgs` runs.
+
+### Why
+
+- `senpi --help` is the discovery surface for subcommands. Without these rows the A2A server ships invisible, and the default listen address (`http://127.0.0.1:41241`) has nowhere to be seen.
+
+### Why an extension could not handle it
+
+- The help text is a static string built in the entrypoint parser, rendered before extensions load.
+
+### Expected merge conflict zones
+
+- LOW: the `Commands:` and `Examples:` blocks in `packages/coding-agent/src/cli/args.ts`, which upstream edits whenever it adds a subcommand.
+
 ## 2026-09-04 - Apply terminal capability overrides to the startup TUI
 
 ### What changed
