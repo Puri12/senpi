@@ -1,5 +1,6 @@
 import { isIP } from "node:net";
 import { APP_NAME } from "../../config.ts";
+import { isLocalPath, resolvePath } from "../../utils/paths.ts";
 
 export type A2aServerListen = {
 	readonly url: string;
@@ -15,6 +16,7 @@ export type A2aServerModeOptions = {
 	readonly auth?: A2aServerAuth;
 	readonly cwd: string;
 	readonly name: string;
+	readonly extensions: readonly string[];
 };
 
 export type A2aServerUsageError = {
@@ -32,7 +34,7 @@ export const A2A_SERVER_LISTEN_USAGE =
 	"Invalid --listen value. Use http://IP:PORT with an IP literal host and an explicit port.";
 
 export function formatA2aServerUsage(): string {
-	return `Usage: ${APP_NAME} a2a-server [--listen <http://IP:PORT>] [--auth <token-file|off>] [--cwd <dir>] [--name <agent name>]`;
+	return `Usage: ${APP_NAME} a2a-server [--listen <http://IP:PORT>] [--auth <token-file|off>] [--cwd <dir>] [--name <agent name>] [--extension <path>]...`;
 }
 
 function parseListen(value: string): A2aServerListen | undefined {
@@ -69,6 +71,7 @@ export function parseA2aServerCliArgs(args: readonly string[]): A2aServerCliArgs
 	let auth: A2aServerAuth | undefined;
 	let cwd = process.cwd();
 	let name = "senpi";
+	const extensions: string[] = [];
 
 	for (let index = 0; index < args.length; index++) {
 		const arg = args[index];
@@ -115,11 +118,20 @@ export function parseA2aServerCliArgs(args: readonly string[]): A2aServerCliArgs
 			index++;
 			continue;
 		}
+		if (arg === "--extension") {
+			const value = args[index + 1];
+			if (value === undefined) {
+				return { kind: "usage-error", message: "--extension requires a path." };
+			}
+			extensions.push(isLocalPath(value) ? resolvePath(value, process.cwd()) : value);
+			index++;
+			continue;
+		}
 		return { kind: "usage-error", message: `Unexpected a2a-server argument: ${arg}` };
 	}
 
 	if (auth === undefined) {
-		return { kind: "server", listen, cwd, name };
+		return { kind: "server", listen, cwd, name, extensions };
 	}
-	return { kind: "server", listen, auth, cwd, name };
+	return { kind: "server", listen, auth, cwd, name, extensions };
 }

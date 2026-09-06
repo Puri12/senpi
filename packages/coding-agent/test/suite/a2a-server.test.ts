@@ -155,10 +155,12 @@ describe("a2a-server HTTP JSON-RPC", () => {
 		const response = await fetch(`http://${handle.host}:${handle.port}${AGENT_CARD_PATH}`);
 		const card = (await response.json()) as {
 			supportedInterfaces: Array<{ url: string; protocolBinding: string; protocolVersion: string }>;
-			capabilities: { streaming: boolean };
+			capabilities: { streaming: boolean; extensions?: unknown };
+			skills: Array<{ id: string }>;
 		};
 
-		// Then: the card advertises JSON-RPC 1.0 at this origin with streaming enabled.
+		// Then: the card advertises JSON-RPC 1.0 at this origin with streaming enabled,
+		// no extensions capability, and only the coding-agent skill.
 		expect(response.status).toBe(200);
 		expect(card.supportedInterfaces[0]).toEqual({
 			url: `http://${handle.host}:${handle.port}`,
@@ -166,6 +168,25 @@ describe("a2a-server HTTP JSON-RPC", () => {
 			protocolVersion: "1.0",
 		});
 		expect(card.capabilities.streaming).toBe(true);
+		expect(card.capabilities).not.toHaveProperty("extensions");
+		expect(card.skills.map((skill) => skill.id)).toEqual(["coding-agent"]);
+	});
+
+	it("advertises omo-remote and ultrawork on the agent card when extensions are set", async () => {
+		// Given: an a2a-server started with at least one extension path (injected createSession
+		// bypasses defaultCreateSession, so this case only covers card advertisement).
+		const { handle } = await startWithHarness({ extensions: ["/tmp/x"] });
+
+		// When: the well-known agent card is fetched.
+		const response = await fetch(`http://${handle.host}:${handle.port}${AGENT_CARD_PATH}`);
+		const card = (await response.json()) as {
+			capabilities: { extensions?: Array<{ uri: string }> };
+			skills: Array<{ id: string }>;
+		};
+
+		// Then: the card advertises the omo-remote extension uri and the ultrawork skill.
+		expect(card.capabilities.extensions?.[0]?.uri).toBe("https://omo.dev/a2a/ext/omo-remote/v1");
+		expect(card.skills.some((skill) => skill.id === "ultrawork")).toBe(true);
 	});
 
 	it("completes a blocking SendMessage with the faux assistant text", async () => {
