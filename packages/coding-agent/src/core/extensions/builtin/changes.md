@@ -1,5 +1,23 @@
 # Builtin extensions changes
 
+## Register the a2a builtin after webfetch (2026-09-06)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/index.ts`: imports `a2aExtension` from `./a2a/index.ts` and inserts `{ id: "a2a", factory: a2aExtension }` directly after `webfetch`, keeping it beside the other network tools and ahead of `tool-search` so the shared tool catalog picks up the generated `a2a_<name>` tools.
+
+### Why
+
+- The A2A client only exists as a tool source if it is in the builtin registration list. Position matters twice: after the network builtins for a coherent ordering, and before `tool-search` so its catalog sees the registered agent tools.
+
+### Why an extension could not handle it
+
+- This is the shipped builtin registry itself. A user extension can add its own tools but cannot put a builtin in the binary's default load order.
+
+### Expected merge conflict zones
+
+- LOW: the import block and the `builtinExtensions` array in `packages/coding-agent/src/core/extensions/builtin/index.ts`. Keep the `a2a` entry between `webfetch` and `video-in`.
+
 ## Preserve explicit fast variants at session start (2026-09-05)
 
 ### What changed

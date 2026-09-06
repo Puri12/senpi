@@ -11,6 +11,7 @@ import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { setCapabilityOverrides } from "@earendil-works/pi-tui";
 import chalk from "chalk";
+import { handleA2aServerCommand } from "./cli/a2a-server-command.ts";
 import { handleAppServerCommand } from "./cli/app-server-command.ts";
 import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp } from "./cli/args.ts";
 import {
@@ -755,6 +756,10 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (await handleAppServerCommand(args)) {
+		return;
+	}
+
+	if (await handleA2aServerCommand(args)) {
 		return;
 	}
 

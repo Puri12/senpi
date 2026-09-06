@@ -1,5 +1,23 @@
 # changes
 
+## 2026-09-06 - Dispatch the a2a-server command from main
+
+### What changed
+
+- `packages/coding-agent/src/main.ts`: imports `handleA2aServerCommand` from `./cli/a2a-server-command.ts` and calls it immediately after the `handleAppServerCommand` hook, so `senpi a2a-server ...` starts the A2A listener and returns before `parseArgs` sees the argv.
+
+### Why
+
+- `a2a-server` is a standalone subcommand with its own flag grammar (`--listen`, `--auth`, `--cwd`, `--name`), exactly like `app-server`. Routing it through the normal parser would either reject the flags or force them into the shared `Args` surface.
+
+### Why an extension could not handle it
+
+- Subcommand dispatch happens in the entrypoint before any session or extension exists; there is no hook that runs early enough to claim argv.
+
+### Expected merge conflict zones
+
+- LOW: the import block and the subcommand hook chain in `packages/coding-agent/src/main.ts` around `handleAppServerCommand`.
+
 ## 2026-09-05 - Ctrl+P skips favorites without context room
 
 ### What changed

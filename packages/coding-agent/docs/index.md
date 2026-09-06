@@ -47,6 +47,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Extensions](extensions.md) - TypeScript modules for tools, commands, events, custom UI, and builtin command hooks.
 - [Skills](skills.md) - Agent Skills for reusable on-demand capabilities.
 - [MCP](mcp.md) - built-in Model Context Protocol client: servers, context-efficient tool exposure, resources, prompts, auth.
+- [A2A](a2a.md) - Agent2Agent protocol: serve senpi to other agents with `senpi a2a-server` and call remote A2A agents as tools.
 - [Prompt templates](prompt-templates.md) - reusable prompts that expand from slash commands.
 - [Themes](themes.md) - built-in and custom terminal themes.
 - [Senpi packages](packages.md) - bundle and share extensions, skills, prompts, and themes.
@@ -57,6 +58,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 
 - [SDK](sdk.md) - embed senpi in Node.js applications.
 - [RPC mode](rpc.md) - integrate over stdin/stdout JSONL.
+- [A2A server](a2a.md#serving-senpi-over-a2a) - expose sessions to other agents over the A2A protocol.
 - [JSON event stream mode](json.md) - print mode with structured events.
 - [TUI components](tui.md) - build custom terminal UI for extensions.
 

@@ -6,6 +6,8 @@
 
 ### Added
 
+- A2A (Agent2Agent) protocol v1.0 support: `senpi a2a-server` serves sessions over JSON-RPC + SSE with a public agent card, and the builtin `a2a` extension turns `a2a.json` agents into `a2a_<name>` tools with a `/a2a` command (docs/a2a.md).
+
 ### Changed
 
 ### Fixed
