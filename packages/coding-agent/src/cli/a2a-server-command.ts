@@ -1,4 +1,9 @@
-import { formatA2aServerUsage, parseA2aServerCliArgs, runA2aServerMode } from "../modes/a2a-server/index.ts";
+import {
+	A2aServerListenError,
+	formatA2aServerUsage,
+	parseA2aServerCliArgs,
+	runA2aServerMode,
+} from "../modes/a2a-server/index.ts";
 
 export async function handleA2aServerCommand(args: readonly string[]): Promise<boolean> {
 	if (args[0] !== "a2a-server") {
@@ -15,6 +20,14 @@ export async function handleA2aServerCommand(args: readonly string[]): Promise<b
 		console.log(formatA2aServerUsage());
 		return true;
 	}
-	await runA2aServerMode(parsed);
+	try {
+		await runA2aServerMode(parsed);
+	} catch (error: unknown) {
+		if (error instanceof A2aServerListenError) {
+			console.error(`Error: ${error.message}`);
+			process.exit(error.exitCode);
+		}
+		throw error;
+	}
 	return true;
 }
