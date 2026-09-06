@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { formatA2aServerUsage, parseA2aServerCliArgs } from "../../src/modes/a2a-server/cli-args.ts";
 
@@ -7,12 +8,13 @@ describe("a2a-server CLI argument parsing", () => {
 		// When: the subcommand args are parsed.
 		const result = parseA2aServerCliArgs([]);
 
-		// Then: listen, cwd, and name fall back to the documented defaults and auth stays managed.
+		// Then: listen, cwd, and name fall back to the documented defaults, auth stays managed, and extensions is empty.
 		expect(result).toEqual({
 			kind: "server",
 			listen: { url: "http://127.0.0.1:41241", host: "127.0.0.1", port: 41241 },
 			cwd: process.cwd(),
 			name: "senpi",
+			extensions: [],
 		});
 	});
 
@@ -27,6 +29,7 @@ describe("a2a-server CLI argument parsing", () => {
 			listen: { url: "http://127.0.0.1:41242", host: "127.0.0.1", port: 41242 },
 			cwd: process.cwd(),
 			name: "senpi",
+			extensions: [],
 		});
 	});
 
@@ -83,5 +86,47 @@ describe("a2a-server CLI argument parsing", () => {
 		// Then: parsing returns the help variant and usage text mentions a2a-server.
 		expect(result).toEqual({ kind: "help" });
 		expect(formatA2aServerUsage()).toContain("a2a-server");
+	});
+
+	it("resolves a relative --extension path against process.cwd()", () => {
+		// Given: a relative extension path.
+		// When: the subcommand args are parsed.
+		const result = parseA2aServerCliArgs(["--extension", "./plugins/omo"]);
+
+		// Then: the path is resolved against process.cwd().
+		expect(result).toMatchObject({
+			kind: "server",
+			extensions: [resolve(process.cwd(), "./plugins/omo")],
+		});
+	});
+
+	it("accumulates two --extension flags in order", () => {
+		// Given: two --extension flags.
+		// When: the subcommand args are parsed.
+		const result = parseA2aServerCliArgs(["--extension", "./first", "--extension", "./second"]);
+
+		// Then: both paths are kept in flag order, each resolved against process.cwd().
+		expect(result).toMatchObject({
+			kind: "server",
+			extensions: [resolve(process.cwd(), "./first"), resolve(process.cwd(), "./second")],
+		});
+	});
+
+	it("keeps an absolute --extension path", () => {
+		// Given: an absolute extension path.
+		// When: the subcommand args are parsed.
+		const result = parseA2aServerCliArgs(["--extension", "/tmp/x"]);
+
+		// Then: the absolute path is stored unchanged.
+		expect(result).toMatchObject({ kind: "server", extensions: ["/tmp/x"] });
+	});
+
+	it("returns a usage error when --extension has no path", () => {
+		// Given: --extension as the last argument with no value.
+		// When: the subcommand args are parsed.
+		const result = parseA2aServerCliArgs(["--extension"]);
+
+		// Then: parsing returns the documented usage error.
+		expect(result).toEqual({ kind: "usage-error", message: "--extension requires a path." });
 	});
 });

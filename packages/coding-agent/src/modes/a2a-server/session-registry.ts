@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
-import { ENV_SESSION_DIR } from "../../config.ts";
+import { ENV_SESSION_DIR, getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import { DefaultResourceLoader } from "../../core/resource-loader.ts";
 import { createAgentSession } from "../../core/sdk.ts";
 import { SessionManager } from "../../core/session-manager.ts";
+import { SettingsManager } from "../../core/settings-manager.ts";
 
 export type CreateA2aSessionOptions = {
 	readonly cwd: string;
@@ -27,11 +29,13 @@ export class A2aSessionRegistry {
 		readonly cwd: string;
 		readonly createSession?: CreateA2aSession;
 		readonly stderr?: Pick<NodeJS.WriteStream, "write">;
+		readonly extensions?: readonly string[];
 	}) {
 		this.cwd = options.cwd;
 		this.stderr = options.stderr ?? process.stderr;
+		const extensions = options.extensions ?? [];
 		this.createSession =
-			options.createSession ?? ((sessionOptions) => defaultCreateSession(sessionOptions, this.stderr));
+			options.createSession ?? ((sessionOptions) => defaultCreateSession(sessionOptions, this.stderr, extensions));
 	}
 
 	newContextId(): string {
@@ -80,11 +84,33 @@ export class A2aSessionRegistry {
 async function defaultCreateSession(
 	options: CreateA2aSessionOptions,
 	stderr: Pick<NodeJS.WriteStream, "write">,
+	extensions: readonly string[],
 ): Promise<{ session: AgentSession }> {
-	const result = await createAgentSession({
-		cwd: options.cwd,
-		sessionManager: options.sessionManager,
-	});
+	const cwd = options.cwd;
+	let result: { session: AgentSession };
+	if (extensions.length > 0) {
+		const agentDir = getAgentDir();
+		const settingsManager = SettingsManager.create(cwd, agentDir);
+		const resourceLoader = new DefaultResourceLoader({
+			cwd,
+			agentDir,
+			settingsManager,
+			additionalExtensionPaths: [...extensions],
+		});
+		await resourceLoader.reload();
+		result = await createAgentSession({
+			cwd,
+			agentDir,
+			sessionManager: options.sessionManager,
+			resourceLoader,
+			settingsManager,
+		});
+	} else {
+		result = await createAgentSession({
+			cwd,
+			sessionManager: options.sessionManager,
+		});
+	}
 	await result.session.bindExtensions({
 		mode: "app-server",
 		onError: (error) => {

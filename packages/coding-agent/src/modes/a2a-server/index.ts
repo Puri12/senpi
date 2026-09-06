@@ -42,16 +42,19 @@ export type StartA2aServerOptions = {
 	readonly auth?: WebSocketListenerAuth;
 	readonly createSession?: CreateA2aSession;
 	readonly stderr?: Pick<NodeJS.WriteStream, "write">;
+	readonly extensions?: readonly string[];
 };
 
 export async function startA2aServer(options: StartA2aServerOptions): Promise<A2aServerHandle> {
 	const cwd = options.cwd ?? process.cwd();
 	const name = options.name ?? "senpi";
 	const stderr = options.stderr ?? process.stderr;
+	const extensions = options.extensions ?? [];
 	const registry = new A2aSessionRegistry({
 		cwd,
 		createSession: options.createSession,
 		stderr,
+		extensions,
 	});
 	const store = new TaskStore();
 	const authEnabled = options.auth === undefined || options.auth.kind !== "off";
@@ -61,6 +64,7 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 		version: VERSION,
 		authEnabled,
 		...(options.description === undefined ? {} : { description: options.description }),
+		...(extensions.length > 0 ? { extensionsLoaded: true } : {}),
 	});
 	const handler = createA2aRequestHandler({ registry, store, card, versionCheck: true });
 	const listener = await startA2aHttpListener({
@@ -117,6 +121,7 @@ export async function runA2aServerMode(options: A2aServerModeOptions): Promise<v
 		cwd: options.cwd,
 		name: options.name,
 		auth: toListenerAuth(options.auth),
+		extensions: options.extensions,
 	});
 	process.stderr.write(`senpi a2a-server listening on ${handle.url}\n`);
 	process.stderr.write(`agent card ${handle.url}${AGENT_CARD_PATH}\n`);

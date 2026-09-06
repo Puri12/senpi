@@ -11,7 +11,7 @@ senpi a2a-server
 Usage:
 
 ```text
-senpi a2a-server [--listen <http://IP:PORT>] [--auth <token-file|off>] [--cwd <dir>] [--name <agent name>]
+senpi a2a-server [--listen <http://IP:PORT>] [--auth <token-file|off>] [--cwd <dir>] [--name <agent name>] [--extension <path>]...
 ```
 
 ### Flags
@@ -37,6 +37,9 @@ Workspace directory every session runs in. Default: the process cwd.
 
 ### `--name`
 Agent name published in the agent card. Default `senpi`.
+
+### `--extension`
+Repeatable path to an extra extension loaded into every server session (for example the omo plugin, so remote sessions have its tools). Relative and other local values are resolved against the process cwd. When at least one `--extension` is loaded, the agent card advertises the `https://omo.dev/a2a/ext/omo-remote/v1` capability and an `ultrawork` skill.
 
 `--help` / `-h` prints the usage line and exits.
 
