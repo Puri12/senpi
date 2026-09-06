@@ -23,6 +23,7 @@ import type {
 	StreamResponse,
 	TaskState,
 } from "../../core/a2a/types.ts";
+import { isSteerRequest, resolveSteerTarget } from "./omo-remote.ts";
 import type { A2aSessionRegistry } from "./session-registry.ts";
 import { A2aTaskRunner } from "./task-runner.ts";
 
@@ -88,6 +89,8 @@ export function createA2aRequestHandler(options: {
 	readonly card: AgentCard;
 	readonly versionCheck?: boolean;
 	readonly runner?: A2aTaskRunner;
+	/** Enables the `https://omo.dev/a2a/ext/omo-remote/v1` behaviours: steer and usage reporting. */
+	readonly omoRemote?: boolean;
 }): A2aRequestHandler {
 	const runner = options.runner ?? new A2aTaskRunner();
 	const subscribers = new Map<string, Set<SseSink>>();
@@ -112,11 +115,31 @@ export function createA2aRequestHandler(options: {
 		subscribers.set(taskId, set);
 	};
 
+	const omoRemote = options.omoRemote === true;
+
 	const run = async (request: SendMessageRequest, streaming: boolean, respond: A2aRespond): Promise<void> => {
+		const historyLength = request.configuration?.historyLength;
+		const steerTarget =
+			omoRemote && isSteerRequest(request.message)
+				? resolveSteerTarget(request.message, options.store, () => options.registry.newContextId())
+				: undefined;
+		if (steerTarget !== undefined) {
+			// Steering joins the running turn, so it must not queue behind it on the context chain.
+			const entry = await options.registry.getOrCreate(steerTarget.contextId);
+			await entry.session.steer(messageText(request.message));
+			const snapshot = options.store.snapshot(steerTarget.taskId, historyLength);
+			if (streaming) {
+				const sink = respond.stream();
+				attach(steerTarget.taskId, sink);
+				sink.write({ task: snapshot });
+				return;
+			}
+			respond.json({ task: snapshot });
+			return;
+		}
 		const contextId = resolveContextId(request.message, options.store, options.registry);
 		const inbound: Message = { ...request.message, contextId };
 		const task = options.store.create(contextId, inbound);
-		const historyLength = request.configuration?.historyLength;
 		const work = () =>
 			options.registry.enqueue(contextId, async ({ session }) => {
 				await runner.runTask({
@@ -126,6 +149,7 @@ export function createA2aRequestHandler(options: {
 					contextId,
 					text: messageText(inbound),
 					onEvent: (event) => emit(task.id, event),
+					...(omoRemote ? { reportUsage: true } : {}),
 				});
 			});
 		if (streaming) {

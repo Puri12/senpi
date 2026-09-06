@@ -2,9 +2,9 @@ import { randomUUID } from "node:crypto";
 import { taskNotCancelableError } from "../../core/a2a/errors.ts";
 import { textPart } from "../../core/a2a/json-rpc.ts";
 import type { TaskStore } from "../../core/a2a/task-store.ts";
-import type { Message, StreamResponse, Task, TaskState } from "../../core/a2a/types.ts";
+import type { Message, Metadata, StreamResponse, Task, TaskState } from "../../core/a2a/types.ts";
 import { isTerminalTaskState } from "../../core/a2a/types.ts";
-import type { AgentSession, AgentSessionEvent } from "../../core/agent-session.ts";
+import type { AgentSession, AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
 
 export type RunTaskInput = {
 	readonly session: AgentSession;
@@ -13,6 +13,17 @@ export type RunTaskInput = {
 	readonly contextId: string;
 	readonly text: string;
 	readonly onEvent: (event: StreamResponse) => void;
+	/** omo-remote/v1: attach this turn's token/cost delta to the terminal status update. */
+	readonly reportUsage?: boolean;
+};
+
+/** Everything the terminal status update needs, so `finish` stays a three-argument call. */
+type TurnOutcome = {
+	readonly state: TaskState;
+	readonly statusMessage: Message | undefined;
+	readonly text: string;
+	readonly producedText: boolean;
+	readonly artifactId: string;
 };
 
 type RunningTask = {
@@ -52,10 +63,18 @@ export class A2aTaskRunner {
 async function executeTurn(input: RunTaskInput, record: RunningTask): Promise<void> {
 	if (record.canceled || isTerminalTaskState(input.store.get(input.taskId).status.state)) {
 		if (!isTerminalTaskState(input.store.get(input.taskId).status.state)) {
-			finish(input, "TASK_STATE_CANCELED", undefined, "", false, randomUUID());
+			const canceled: TurnOutcome = {
+				state: "TASK_STATE_CANCELED",
+				statusMessage: undefined,
+				text: "",
+				producedText: false,
+				artifactId: randomUUID(),
+			};
+			finish(input, canceled, undefined);
 		}
 		return;
 	}
+	const baseline = input.reportUsage === true ? input.session.getSessionStats() : undefined;
 
 	let terminal: TaskState | undefined;
 	let statusMessage: Message | undefined;
@@ -112,8 +131,17 @@ async function executeTurn(input: RunTaskInput, record: RunningTask): Promise<vo
 		}
 		if (event.type === "agent_end" && event.willRetry === false && !finished) {
 			finished = true;
-			const state = resolveState(record, terminal);
-			finish(input, state, statusMessage, chunks.join(""), producedText, artifactId);
+			finish(
+				input,
+				{
+					state: resolveState(record, terminal),
+					statusMessage,
+					text: chunks.join(""),
+					producedText,
+					artifactId,
+				},
+				usageMetadata(input, baseline),
+			);
 		}
 	});
 
@@ -127,10 +155,40 @@ async function executeTurn(input: RunTaskInput, record: RunningTask): Promise<vo
 		unsubscribe();
 		if (!finished) {
 			finished = true;
-			const state = resolveState(record, terminal);
-			finish(input, state, statusMessage, chunks.join(""), producedText, artifactId);
+			finish(
+				input,
+				{
+					state: resolveState(record, terminal),
+					statusMessage,
+					text: chunks.join(""),
+					producedText,
+					artifactId,
+				},
+				usageMetadata(input, baseline),
+			);
 		}
 	}
+}
+
+/** omo-remote/v1 `metadata.omo.usage`: this turn's share of the session totals. */
+function usageMetadata(input: RunTaskInput, baseline: SessionStats | undefined): Metadata | undefined {
+	if (baseline === undefined) {
+		return undefined;
+	}
+	const after = input.session.getSessionStats();
+	const model = input.session.model;
+	return {
+		omo: {
+			usage: {
+				input: after.tokens.input - baseline.tokens.input,
+				output: after.tokens.output - baseline.tokens.output,
+				cacheRead: after.tokens.cacheRead - baseline.tokens.cacheRead,
+				cacheWrite: after.tokens.cacheWrite - baseline.tokens.cacheWrite,
+				cost: after.cost - baseline.cost,
+				...(model === undefined ? {} : { model: model.id }),
+			},
+		},
+	};
 }
 
 function resolveState(record: RunningTask, terminal: TaskState | undefined): TaskState {
@@ -150,31 +208,25 @@ function agentMessage(input: RunTaskInput, text: string): Message {
 	};
 }
 
-function finish(
-	input: RunTaskInput,
-	state: TaskState,
-	statusMessage: Message | undefined,
-	text: string,
-	producedText: boolean,
-	artifactId: string,
-): void {
-	if (producedText) {
+function finish(input: RunTaskInput, outcome: TurnOutcome, metadata: Metadata | undefined): void {
+	if (outcome.producedText) {
 		input.onEvent({
 			artifactUpdate: {
 				taskId: input.taskId,
 				contextId: input.contextId,
-				artifact: { artifactId, name: "response", parts: [] },
+				artifact: { artifactId: outcome.artifactId, name: "response", parts: [] },
 				lastChunk: true,
 			},
 		});
 	}
-	input.store.appendHistory(input.taskId, agentMessage(input, text));
-	input.store.setState(input.taskId, state, statusMessage);
+	input.store.appendHistory(input.taskId, agentMessage(input, outcome.text));
+	input.store.setState(input.taskId, outcome.state, outcome.statusMessage);
 	input.onEvent({
 		statusUpdate: {
 			taskId: input.taskId,
 			contextId: input.contextId,
 			status: input.store.get(input.taskId).status,
+			...(metadata === undefined ? {} : { metadata }),
 		},
 	});
 }
