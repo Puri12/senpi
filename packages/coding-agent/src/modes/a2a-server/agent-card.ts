@@ -1,4 +1,5 @@
 import type { AgentCard } from "../../core/a2a/types.ts";
+import { OMO_REMOTE_EXTENSION_URI } from "./omo-remote.ts";
 
 export type BuildAgentCardInput = {
 	readonly name: string;
@@ -7,6 +8,8 @@ export type BuildAgentCardInput = {
 	readonly version: string;
 	readonly authEnabled?: boolean;
 	readonly extensionsLoaded?: boolean;
+	/** omo plugin version reported in the omo-remote extension params; omitted when unknown. */
+	readonly pluginVersion?: string;
 };
 
 const SKILL_EXAMPLES = [
@@ -36,9 +39,13 @@ export function buildAgentCard(input: BuildAgentCardInput): AgentCard {
 				? {
 						extensions: [
 							{
-								uri: "https://omo.dev/a2a/ext/omo-remote/v1",
+								uri: OMO_REMOTE_EXTENSION_URI,
 								description: "omo remote delegation: workspace metadata, steer, usage reporting",
 								required: false,
+								params: {
+									...(input.pluginVersion === undefined ? {} : { pluginVersion: input.pluginVersion }),
+									engineVersion: input.version,
+								},
 							},
 						],
 					}

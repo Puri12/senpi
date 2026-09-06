@@ -29,6 +29,9 @@ export {
 	parseA2aServerCliArgs,
 };
 
+/** Set by the omo launcher so the agent card can report which plugin build is driving this server. */
+const ENV_OMO_PLUGIN_VERSION = "OMO_PLUGIN_VERSION";
+
 export type A2aServerHandle = A2aHttpListenerHandle & {
 	readonly url: string;
 };
@@ -43,6 +46,8 @@ export type StartA2aServerOptions = {
 	readonly createSession?: CreateA2aSession;
 	readonly stderr?: Pick<NodeJS.WriteStream, "write">;
 	readonly extensions?: readonly string[];
+	/** omo plugin version advertised in the omo-remote extension params. Defaults to `$OMO_PLUGIN_VERSION`. */
+	readonly pluginVersion?: string;
 };
 
 export async function startA2aServer(options: StartA2aServerOptions): Promise<A2aServerHandle> {
@@ -58,6 +63,7 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 	});
 	const store = new TaskStore();
 	const authEnabled = options.auth === undefined || options.auth.kind !== "off";
+	const pluginVersion = options.pluginVersion ?? process.env[ENV_OMO_PLUGIN_VERSION];
 	const card = buildAgentCard({
 		name,
 		url: formatHttpUrl(options.host, options.port),
@@ -65,8 +71,15 @@ export async function startA2aServer(options: StartA2aServerOptions): Promise<A2
 		authEnabled,
 		...(options.description === undefined ? {} : { description: options.description }),
 		...(extensions.length > 0 ? { extensionsLoaded: true } : {}),
+		...(pluginVersion === undefined || pluginVersion === "" ? {} : { pluginVersion }),
 	});
-	const handler = createA2aRequestHandler({ registry, store, card, versionCheck: true });
+	const handler = createA2aRequestHandler({
+		registry,
+		store,
+		card,
+		versionCheck: true,
+		omoRemote: extensions.length > 0,
+	});
 	const listener = await startA2aHttpListener({
 		host: options.host,
 		port: options.port,

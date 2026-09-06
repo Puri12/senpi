@@ -132,6 +132,58 @@ Every SSE frame is a full JSON-RPC success envelope sharing the request `id`. Th
 - Sending `taskId` continues that task's context. If you also send a `contextId` that disagrees with the task's, you get `-32602`.
 - Referring to a task that already reached a terminal state (`COMPLETED`, `FAILED`, `CANCELED`, `REJECTED`) is `-32004`.
 
+### The omo-remote/v1 extension
+
+When the server runs with at least one `--extension`, it advertises `https://omo.dev/a2a/ext/omo-remote/v1` on the agent card and turns on the three behaviours below. Without `--extension` the server behaves exactly as documented above and none of them apply.
+
+**Extension params.** The advertised extension carries its versions in `params`:
+
+```json
+{
+  "uri": "https://omo.dev/a2a/ext/omo-remote/v1",
+  "description": "omo remote delegation: workspace metadata, steer, usage reporting",
+  "required": false,
+  "params": { "pluginVersion": "1.4.191", "engineVersion": "2026.9.5-3" }
+}
+```
+
+`engineVersion` is the senpi version serving the card. `pluginVersion` is read from the `OMO_PLUGIN_VERSION` environment variable (the omo launcher sets it) and is omitted when that variable is unset or empty.
+
+**Steering a running turn.** A `SendMessage` / `SendStreamingMessage` whose message carries `metadata.omo.steer: true` and a `taskId` in `TASK_STATE_WORKING` injects the text into that turn instead of starting a new one:
+
+```json
+{
+  "message": {
+    "messageId": "m2",
+    "role": "ROLE_USER",
+    "parts": [{ "text": "skip the refactor, just fix the test" }],
+    "taskId": "<running task id>",
+    "metadata": { "omo": { "steer": true } }
+  }
+}
+```
+
+The non-streaming response is `{"task": <snapshot of the same task>}` — the id is unchanged and no task is created. The streaming form attaches the SSE stream to that existing task, so you receive its remaining `artifactUpdate` frames and its terminal `statusUpdate`. Steering a task that is not `TASK_STATE_WORKING` (already terminal, still `SUBMITTED`) is `-32602` with detail `task is not running`; steering with a `contextId` that disagrees with the task's is the same `-32602` as elsewhere.
+
+**Follow-up queueing.** The same message *without* the steer flag keeps the standard A2A semantics: one task per turn. The server creates a new task that reuses the named task's `contextId`, and the context's turn queue serializes it — the new turn's prompt only starts after the running task reaches a terminal state. Send `taskId` (or just the `contextId`) and read the new task id from the response.
+
+**Usage reporting.** The terminal `statusUpdate` carries this turn's token and cost delta, computed from the session statistics captured at turn start:
+
+```json
+{
+  "taskId": "…",
+  "contextId": "…",
+  "status": { "state": "TASK_STATE_COMPLETED", "timestamp": "…" },
+  "metadata": {
+    "omo": {
+      "usage": { "input": 812, "output": 240, "cacheRead": 4096, "cacheWrite": 128, "cost": 0.0113, "model": "claude-sonnet-4-5" }
+    }
+  }
+}
+```
+
+All five numbers are this turn's delta, not session totals; `model` is the model that ran the turn and is omitted when no model is selected. With the extension inactive the terminal `statusUpdate` has no `metadata` key at all.
+
 ### Cancellation
 
 `CancelTask` with `{"id": "<taskId>"}` aborts the in-flight turn, moves the task to `TASK_STATE_CANCELED`, returns the updated task, and pushes that `statusUpdate` to every open SSE subscriber before closing their streams. Canceling an already-terminal task is `-32002`.

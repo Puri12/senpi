@@ -6,6 +6,7 @@
 
 ### Added
 
+- `senpi a2a-server` implements the `https://omo.dev/a2a/ext/omo-remote/v1` extension when started with `--extension`: `metadata.omo.steer` messages steer the running task instead of creating one, terminal status updates report the turn's `metadata.omo.usage` (tokens, cost, model), and the advertised extension carries `params.pluginVersion` (from `OMO_PLUGIN_VERSION`) and `params.engineVersion` (docs/a2a.md).
 - `senpi a2a-server --extension <path>` (repeatable) loads extensions into the server's sessions and advertises the `omo-remote/v1` capability plus an `ultrawork` skill on the agent card.
 - A2A (Agent2Agent) protocol v1.0 support: `senpi a2a-server` serves sessions over JSON-RPC + SSE with a public agent card, and the builtin `a2a` extension turns `a2a.json` agents into `a2a_<name>` tools with a `/a2a` command (docs/a2a.md).
 
