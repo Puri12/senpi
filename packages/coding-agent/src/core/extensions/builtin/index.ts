@@ -1,4 +1,5 @@
 import type { ExtensionFactory } from "../types.ts";
+import a2aExtension from "./a2a/index.ts";
 import accountExtension from "./account/index.ts";
 import anthropicBashExtension from "./anthropic-bash/index.ts";
 import anthropicWebSearchExtension from "./anthropic-web-search/index.ts";
@@ -91,6 +92,8 @@ export const builtinExtensions: BuiltinExtensionFactory[] = [
 	{ id: "import-repro", factory: importReproExtension },
 	{ id: "websearch", factory: websearchExtension },
 	{ id: "webfetch", factory: webfetchExtension },
+	// A2A client tools sit beside the other network tools; before tool-search so the shared catalog sees them.
+	{ id: "a2a", factory: a2aExtension },
 	{ id: "video-in", factory: videoInExtension },
 	{ id: "look-at", factory: lookAtExtension },
 	{ id: "nested-agents-md", factory: nestedAgentsMdExtension },

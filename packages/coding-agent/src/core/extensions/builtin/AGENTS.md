@@ -1,6 +1,6 @@
 # packages/coding-agent/src/core/extensions/builtin
 
-39 in-tree extensions plus 4 global defaults. Each is the canonical answer to "can senpi do X without core changes?". Registration order matters.
+40 in-tree extensions plus 4 global defaults. Each is the canonical answer to "can senpi do X without core changes?". Registration order matters.
 
 ## INVENTORY (registration order from `builtin/index.ts`)
 
@@ -31,20 +31,21 @@
 | 23 | `import-repro` | `import-repro.ts` | `/ir` command — import an issue-analysis CI session gist and switch to it |
 | 24 | `websearch` | `websearch/` | Provider-backed `web_search` tool + `/websearch` (providers incl. kimi); vendored from `../pi-extensions/pi-websearch` |
 | 25 | `webfetch` | `webfetch/` | `webfetch` tool (md/text/html, gated by `PI_WEBFETCH`); vendored from `../pi-extensions/pi-webfetch` |
-| 26 | `video-in` | `video-in/` | Model-gated `read_video` tool (kimi-code ReadMediaFile parity); active only when the model declares the "video" input modality |
-| 27 | `look-at` | `look-at/` | Vision-model delegation tool for media analysis when the active model cannot accept image input |
-| 28 | `nested-agents-md` | `nested-agents-md/` | Auto-injects nearby `AGENTS.md` + `/nested-agents`; vendored from `../pi-extensions/pi-nested-agents-md` |
-| 29 | `rules` | `rules/` | Rule-file discovery + `/rules`/`/reload-rules`; vendored from `../pi-extensions/pi-rules` |
-| 30 | `goal` | `goal/` | Budget-free goal tools + `/goal`; vendored from `../pi-extensions/pi-goal` |
-| 31 | `loop` | `loop/` | Scheduled/cron loop runs driven by a loopfile + `/loop` command — see `loop/AGENTS.md` |
-| 32 | `cache-keepalive` | `cache-keepalive/` | Warms the provider prompt cache between turns (`warmPromptCache`, Anthropic-aware TTL) and renders a `cache-keepalive` notice entry |
-| 33 | `ttsr` | `ttsr/` | Stream-rule detection (collapse + control-token-leak) with abort→remediate→retry; ported from oh-my-pi — see `ttsr/changes.md` |
-| 34 | `btw` | `btw/` | `/btw` side-question command that queries in parallel without touching the main session |
-| 35 | `claude-sdk-oauth` | `claude-sdk-oauth/` | Claude SDK OAuth provider: multi-account OAuth, resume-first session continuity, stream-safe failover — see `claude-sdk-oauth/AGENTS.md` + `changes.md` |
-| 36 | `cursor-cli-oauth` | `cursor-cli-oauth/` | Cursor CLI OAuth provider lane: multi-account OAuth, spawn/stream parsing, failover; registers unconditionally and reports executable/auth state through its oauth check — see `cursor-cli-oauth/AGENTS.md` |
-| 37 | `config-reload` | `config-reload/` | Hash-gated watcher for trusted global/project config surfaces that defers a full session reload until idle and exposes the `config-watch:*` event protocol; registered after settings-dependent builtins so a reload rebuilds their resolved settings, and before final MCP observation |
-| 38 | `tool-search` | `tool-search/` | Shared tool catalog + `tool_search` exposure tool; loads before MCP, which feeds its tools into the same catalog |
-| 39 | `mcp` | `mcp/` | Built-in MCP client: `mcpServers` config, stdio/http transports, `/mcp` commands, tool exposure policy — kept last so its provider-payload tap observes all co-resident builtin mutations; see `mcp/changes.md` |
+| 26 | `a2a` | `a2a/` | Built-in A2A (Agent2Agent) client: a2a.json agents -> a2a_<name> tools + /a2a command |
+| 27 | `video-in` | `video-in/` | Model-gated `read_video` tool (kimi-code ReadMediaFile parity); active only when the model declares the "video" input modality |
+| 28 | `look-at` | `look-at/` | Vision-model delegation tool for media analysis when the active model cannot accept image input |
+| 29 | `nested-agents-md` | `nested-agents-md/` | Auto-injects nearby `AGENTS.md` + `/nested-agents`; vendored from `../pi-extensions/pi-nested-agents-md` |
+| 30 | `rules` | `rules/` | Rule-file discovery + `/rules`/`/reload-rules`; vendored from `../pi-extensions/pi-rules` |
+| 31 | `goal` | `goal/` | Budget-free goal tools + `/goal`; vendored from `../pi-extensions/pi-goal` |
+| 32 | `loop` | `loop/` | Scheduled/cron loop runs driven by a loopfile + `/loop` command — see `loop/AGENTS.md` |
+| 33 | `cache-keepalive` | `cache-keepalive/` | Warms the provider prompt cache between turns (`warmPromptCache`, Anthropic-aware TTL) and renders a `cache-keepalive` notice entry |
+| 34 | `ttsr` | `ttsr/` | Stream-rule detection (collapse + control-token-leak) with abort→remediate→retry; ported from oh-my-pi — see `ttsr/changes.md` |
+| 35 | `btw` | `btw/` | `/btw` side-question command that queries in parallel without touching the main session |
+| 36 | `claude-sdk-oauth` | `claude-sdk-oauth/` | Claude SDK OAuth provider: multi-account OAuth, resume-first session continuity, stream-safe failover — see `claude-sdk-oauth/AGENTS.md` + `changes.md` |
+| 37 | `cursor-cli-oauth` | `cursor-cli-oauth/` | Cursor CLI OAuth provider lane: multi-account OAuth, spawn/stream parsing, failover; registers unconditionally and reports executable/auth state through its oauth check — see `cursor-cli-oauth/AGENTS.md` |
+| 38 | `config-reload` | `config-reload/` | Hash-gated watcher for trusted global/project config surfaces that defers a full session reload until idle and exposes the `config-watch:*` event protocol; registered after settings-dependent builtins so a reload rebuilds their resolved settings, and before final MCP observation |
+| 39 | `tool-search` | `tool-search/` | Shared tool catalog + `tool_search` exposure tool; loads before MCP, which feeds its tools into the same catalog |
+| 40 | `mcp` | `mcp/` | Built-in MCP client: `mcpServers` config, stdio/http transports, `/mcp` commands, tool exposure policy — kept last so its provider-payload tap observes all co-resident builtin mutations; see `mcp/changes.md` |
 
 Plus bundled extension **codemode** (`@code-yeongyu/senpi-codemode`, resolved by resource-loader.ts) and 4 **global default extensions** (resolved fast-path): `diff`, `files`, `prompt-url-widget`, `tps` (in `globalDefaultExtensionFactories`). Shared non-factory modules: `rule-activation/` (appendRuleActivation + renderer, consumed by `rules/` and `ttsr/`) and `monitor-state-event.ts` (consumed by `goal/` and `terminal/`).
 
