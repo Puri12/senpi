@@ -309,6 +309,8 @@ ${chalk.bold("Commands:")}
                                  Serve agent sessions over the Codex app-server protocol
   ${APP_NAME} app-server daemon <start|stop|status|restart> [--listen <url>]
                                  Manage the app-server daemon
+  ${APP_NAME} a2a-server [--listen <url>]
+                                 Serve the agent over the A2A (Agent2Agent) protocol
   ${APP_NAME} auth <command>            Print credentials or check provider readiness
   ${APP_NAME} <command> --help          Show help for install/remove/uninstall/update/list/config/auth
 
@@ -428,6 +430,7 @@ ${chalk.bold("Examples:")}
   # Start Codex app-server protocol scaffolding
   ${APP_NAME} app-server --listen stdio://
   ${APP_NAME} app-server --listen ws://127.0.0.1:18991
+  ${APP_NAME} a2a-server --listen http://127.0.0.1:41241
 
 ${chalk.bold("Environment Variables:")}
   ANTHROPIC_AUTH_TOKEN             - Anthropic bearer auth token
