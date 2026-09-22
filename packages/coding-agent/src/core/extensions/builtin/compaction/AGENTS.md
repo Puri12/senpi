@@ -31,6 +31,12 @@ compaction/
 ├── todo-bridge.ts            # Carries todos through compaction so the summary preserves them
 ├── restoration-tracker.ts    # Post-compact: re-injects skill + file context (fork-introduced)
 ├── prompts.ts                # Compaction summarization prompt + system message
+├── jev/                      # Jev route: verbatim tool-call/result pruning instead of LLM summarization
+│   ├── generator.ts          # generateJevCompaction — snapshot → CompactionResult (`senpi.compaction.jev.v1`)
+│   ├── adapter.ts            # AgentMessage[] ↔ Jev transcript; applyJevDecisions; renderJevSummary
+│   ├── state.ts, decide.ts   # State fitting (staged shrink), noul questions, keep/truncate/drop decisions
+│   ├── client.ts, settings.ts# System One HTTP transport; `compaction.jev` + TYPESAFE_API_KEY resolution
+│   └── types.ts
 ├── lane-policy.ts            # SDK-native lane detection; `external-owner` structured ownership
 ├── deterministic-fallback.ts # Classification + construction when summarization fails outright
 ├── summarization-retry.ts, transient-failure.ts, retained-message-safety.ts  # Retry/safety predicates
@@ -50,6 +56,8 @@ compaction/
 | Change when emergency tool-result truncation fires | `speculative.ts` |
 | Add a new piece of state that should survive compaction | `checkpoint-state.ts` + `restoration-tracker.ts` |
 | Modify the summarization prompt | `prompts.ts` |
+| Change how Jev scores/prunes a span, or the summary layout | `jev/decide.ts`, `jev/adapter.ts` |
+| Switch a route between Jev and LLM summarization | `index.ts` `getJevRoute` (settings), `speculative.ts` `runExtensionCompaction` (dispatch) |
 
 ## PIPELINE (one turn)
 
@@ -66,6 +74,7 @@ compaction/
 - **The 13 per-feature compaction fixtures** under `packages/coding-agent/test/fixtures/compaction/` map 1:1 onto these sub-policies — when you change a policy, update its fixture (and add a new one if you split a behavior).
 - **Restoration tracker is opt-in via `CompactionSettings`** — don't make it unconditional; tests rely on the on/off path.
 - **`session_compact` is the canonical event**; everything else (degradation, restoration) hangs off it.
+- **Jev is the default generator when a key resolves** (`compaction.jev`, `TYPESAFE_API_KEY`); it binds on the snapshot (`snapshot.jev`) so speculative, blocking, and core routes share one switch. Jev failures must map onto the existing summarizer failure classes (`SummaryGenerationError` / `SummaryRequestError`) so fallback and breaker behavior stay identical.
 
 ## ANTI-PATTERNS
 
@@ -76,6 +85,7 @@ compaction/
 - Treating provider-owned SDK-native compaction as ordinary extension cancellation — `lane-policy.ts` must preserve `external-owner` ownership.
 - Letting an aborted compaction surface: aborts stand down silently (no circuit-breaker failure, no raw abort error, no `{cancel: true}` rejected-compact event).
 - Leaving idle warm-up continuations unfenced against retired extension generations — stale context access becomes an uncaught crash.
+- Rewriting text inside `jev/` — the route only deletes or truncates tool calls/results; user and assistant text is carried verbatim. Never add a summarizing LLM call there.
 
 ## NOTES
 

@@ -236,6 +236,47 @@ Global and project settings merge recursively **before** model lookup. A project
 
 See [compaction.md](compaction.md) for trigger and summarization behavior.
 
+#### Jev compaction (`compaction.jev`)
+
+When a TypeSafe key resolves, compaction no longer asks an LLM for a summary. Every tool call and
+tool result in the span being compacted is scored by TypeSafe's Jev model in one request and then
+kept verbatim, truncated to a short head plus a note, or dropped together with its call. User and
+assistant text is carried through unchanged. This applies to every senpi-owned route: the idle
+warm-up, the blocking hard-limit route, `/compact`, and threshold/overflow compaction. The OpenAI
+remote compaction route and the Claude SDK lane are unaffected.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `compaction.jev.enabled` | boolean | `true` when a key resolves | Route compaction through Jev; `false` keeps the LLM summarizer |
+| `compaction.jev.apiKey` | string | `TYPESAFE_API_KEY` | Literal key or `$ENV_VAR` / `${ENV_VAR}` reference |
+| `compaction.jev.model` | string | `jev-latest` | Jev model name |
+| `compaction.jev.baseUrl` | string | System One endpoint | Override the endpoint |
+| `compaction.jev.keepThreshold` | number | `0.5` | Minimum keep probability for a call or result to stay |
+| `compaction.jev.truncateHeadChars` | number | `300` | Characters of a dropped tool result kept before its note |
+| `compaction.jev.maxStateTokens` | number | `25000` | Estimated token ceiling for the state sent with each request |
+| `compaction.jev.maxRequestTokens` | number | `30000` | Estimated ceiling for state plus one batch of questions |
+| `compaction.jev.minReductionRatio` | number | `0.1` | Below this estimated reduction the result is refused and the route degrades like a failed summarization |
+| `compaction.jev.timeoutMs` | number | `60000` | Per-request wall-clock budget |
+
+```json
+{
+  "compaction": {
+    "jev": {
+      "apiKey": "$TYPESAFE_API_KEY",
+      "keepThreshold": 0.5,
+      "truncateHeadChars": 300
+    }
+  }
+}
+```
+
+Each compaction entry produced this way carries `details.schema = "senpi.compaction.jev.v1"` with
+every per-call decision (`keep`, `drop_result`, `drop_call`) and both Jev probabilities, so a
+`/tree` inspection shows exactly why an item stayed or went. Failures (missing key, transport
+error, a span that cannot be fitted or barely shrinks) are classified like summarizer failures:
+required routes recover deterministically, others cancel with a reason and the circuit breaker
+accounts for them as usual.
+
 ### Branch Summary
 
 | Setting | Type | Default | Description |

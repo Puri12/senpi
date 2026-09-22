@@ -252,6 +252,54 @@
 ### Expected merge conflict zones
 
 - LOW: `packages/coding-agent/src/core/extensions/builtin/compaction/index.ts` around the SDK-native lane guard in `session_before_compact`.
+## Jev compaction replaces LLM summarization on every route (2026-09-22)
+
+### What changed
+
+- New `jev/` module (ported from `fast-jev-compaction`, MIT): `adapter.ts` maps senpi
+  `AgentMessage[]` to a tool-call/result transcript keyed by `toolCallId`; `state.ts` builds and
+  fits the Jev state (tool outputs replaced by notes, staged shrinking); `decide.ts` asks two `noul`
+  questions per call and decides keep / truncate result / drop call against `keepThreshold`;
+  `generator.ts` renders the survivors verbatim as the `summary` and records every decision in
+  `details` (`senpi.compaction.jev.v1`); `client.ts` is the System One HTTP transport;
+  `settings.ts` resolves `compaction.jev` plus `TYPESAFE_API_KEY`.
+- `SpeculativeCompactionSnapshot` gained `jev?: JevCompactionRoute`. `runExtensionCompaction`
+  dispatches to `runJevCompaction` when the snapshot carries it, so the speculative/warm,
+  blocking, and core-route generators all go through Jev with no LLM summarization request.
+  `createSpeculativeCompactionSnapshot` accepts `jev` in its options.
+- `index.ts` resolves the route per snapshot (`getJevRoute`) from `ctx.getCompactionSettings().jev`
+  and attaches it at the three snapshot sites. `compactionExtension` accepts `jevAsker` /
+  `jevEnv` test seams on its dependencies argument.
+- Jev failures map onto the existing summarizer failure classes: aborts resolve `undefined`,
+  an unfittable span or insufficient reduction becomes `SummaryGenerationError("empty-summary")`
+  (deterministic fallback on required routes, `cancel` with reason otherwise), transport errors
+  become a transient `SummaryRequestError` (circuit breaker accounting unchanged).
+- Enabled automatically when a key resolves (`compaction.jev.apiKey`, `$ENV` reference, or
+  `TYPESAFE_API_KEY`); `compaction.jev.enabled: false` keeps the LLM summarizer. The OpenAI remote
+  route and the SDK-native lane stand-down are untouched and still take precedence.
+
+### Why
+
+- An LLM summary is lossy: a file path, exact error, or constraint can disappear even when it
+  matters later. Jev scores each tool call/result for continued relevance in one request and the
+  compaction only deletes or truncates; every kept item and all user/assistant text stay verbatim.
+- Summarization was the one compaction step that could not be replaced from outside: the warm
+  job applies through `applyCompaction(precomputed)` without firing `session_before_compact`, and
+  the builtin handler runs before user extensions and pays for its own LLM call first. Binding the
+  generator on the snapshot covers all three routes at the single choke point.
+
+### Why an extension could not handle it
+
+- Only `session_before_compact` is observable to an extension, and the speculative/warm route
+  never emits it. Replacing the generator requires the builtin's snapshot.
+
+### Expected merge conflict zones
+
+- `speculative.ts` imports, `SpeculativeCompactionSnapshot`, `createSpeculativeCompactionSnapshot`
+  options, the head of `runExtensionCompaction`, and the new `runJevCompaction`.
+- `index.ts` imports, `CompactionExtensionDependencies`, `getJevRoute`, and the three
+  `createSpeculativeCompactionSnapshot` / inline snapshot sites.
+- `test/compaction/jev-compaction.test.ts`, `test/compaction/jev-compaction-routes.test.ts`.
 
 ## Omit speculation lead from resumed-session admission (2026-09-03)
 
