@@ -1,3 +1,4 @@
+import type { JevCompactionSettings } from "../extensions/builtin/compaction/jev/settings.ts";
 import { DEFAULT_IDEAL_COMPACTION_SETTINGS, type IdealCompactionSettings } from "./ideal-compaction-settings.ts";
 
 export interface CompactionSettings extends IdealCompactionSettings {
@@ -15,6 +16,8 @@ export interface CompactionSettings extends IdealCompactionSettings {
 	idleCompactionEnabled?: boolean;
 	/** Optional per-attempt wall-clock budget override for summarization (adaptive default). */
 	summarizationMaxDurationMs?: number;
+	/** Jev-guided verbatim compaction (`compaction.jev`); resolved by the compaction extension. */
+	jev?: JevCompactionSettings;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {

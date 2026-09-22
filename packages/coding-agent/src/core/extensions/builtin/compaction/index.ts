@@ -23,6 +23,9 @@ import {
 } from "./deterministic-fallback.ts";
 import * as idle from "./idle.ts";
 import * as idleRetry from "./idle-retry.ts";
+import { JevClient } from "./jev/client.ts";
+import { resolveJevCompactionSettings } from "./jev/settings.ts";
+import type { JevAsker } from "./jev/types.ts";
 import {
 	CLAUDE_SDK_OAUTH_COMPACT_ENTRY_TYPE,
 	collectCompactBoundaryEntries,
@@ -52,6 +55,7 @@ import {
 import * as cap from "./per-turn-cap.ts";
 import * as policy from "./policy.ts";
 import * as restoration from "./restoration-tracker.ts";
+import type { JevCompactionRoute } from "./speculative.ts";
 import {
 	applyGeneratedCompaction,
 	createEmergencyPruneLatch,
@@ -100,9 +104,16 @@ interface PendingCompactionMetadata {
 	todoSnapshot: todoBridge.TodoSnapshotPayload;
 }
 
+export interface CompactionExtensionDependencies extends OpenAiRemoteCompactionDependencies {
+	/** Test seam: replaces the HTTP Jev client. Settings still decide whether the route is on. */
+	jevAsker?: JevAsker;
+	/** Test seam: environment used to resolve `TYPESAFE_API_KEY`. */
+	jevEnv?: NodeJS.ProcessEnv;
+}
+
 export default function compactionExtension(
 	pi: ExtensionAPI,
-	remoteCompactionDependencies: OpenAiRemoteCompactionDependencies = {},
+	remoteCompactionDependencies: CompactionExtensionDependencies = {},
 ): void {
 	let state: CompactionExtensionState = createInitialState();
 	const lanePolicy = createCompactionLanePolicy();
@@ -117,6 +128,28 @@ export default function compactionExtension(
 	const pendingMetadata = new Map<string, PendingCompactionMetadata>();
 	let logger: CompactionLogger | undefined;
 	const getLogger = (ctx: ExtensionContext): CompactionLogger => (logger ??= createCompactionLogger(ctx.agentDir));
+
+	/**
+	 * Jev binding for every route. Resolved per call so a settings reload or a
+	 * key change takes effect on the next compaction; `undefined` keeps the LLM
+	 * summarizer.
+	 */
+	function getJevRoute(ctx: ExtensionContext): JevCompactionRoute | undefined {
+		const settings = resolveJevCompactionSettings(
+			ctx.getCompactionSettings().jev,
+			remoteCompactionDependencies.jevEnv ?? process.env,
+		);
+		if (!settings.enabled) return undefined;
+		const asker =
+			remoteCompactionDependencies.jevAsker ??
+			new JevClient({
+				apiKey: settings.apiKey ?? "",
+				model: settings.model,
+				baseUrl: settings.baseUrl,
+				timeoutMs: settings.timeoutMs,
+			});
+		return { settings, asker };
+	}
 
 	function getSummarizationTools(): Tool[] {
 		if (typeof pi.getAllTools !== "function" || typeof pi.getActiveTools !== "function") return [];
@@ -335,9 +368,14 @@ export default function compactionExtension(
 			customInstructions,
 			origin: "speculative",
 			tools: getSummarizationTools(),
+			jev: getJevRoute(ctx),
 		});
 		if (!snapshot) return;
-		getLogger(ctx).debug("speculative_started", { generation, origin: "speculative" });
+		getLogger(ctx).debug("speculative_started", {
+			generation,
+			origin: "speculative",
+			route: snapshot.jev ? "jev" : "llm",
+		});
 		const controller = new AbortController();
 		const settled = runExtensionCompaction(ctx, snapshot, controller.signal).then(
 			(result) => ({ result, error: undefined }),
@@ -534,6 +572,7 @@ export default function compactionExtension(
 				customInstructions,
 				origin: "core-route",
 				tools: getSummarizationTools(),
+				jev: getJevRoute(ctx),
 			});
 			if (!snapshot) {
 				const result = { applied: false, reason: "unavailable" } as const;
@@ -706,6 +745,7 @@ export default function compactionExtension(
 				customInstructions: event.customInstructions,
 				systemPrompt: ctx.getSystemPrompt(),
 				tools: getSummarizationTools(),
+				jev: getJevRoute(ctx),
 			};
 			let compaction: CompactionResult | undefined;
 			try {

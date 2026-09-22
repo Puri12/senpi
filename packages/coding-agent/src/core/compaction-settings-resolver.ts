@@ -4,6 +4,7 @@ import {
 	compactionKeepRecentTokens,
 	compactionReserveTokens,
 } from "./compaction-settings-access.ts";
+import type { JevCompactionSettings } from "./extensions/builtin/compaction/jev/settings.ts";
 
 export interface ResolvedCompactionSettings {
 	enabled: boolean;
@@ -25,6 +26,8 @@ export interface ResolvedCompactionSettings {
 	speculativeLeadTokens?: number;
 	/** Positive finite number, or undefined for the size-adaptive default. */
 	summarizationMaxDurationMs?: number;
+	/** Jev route configuration; carried through raw, resolved by the compaction extension. */
+	jev?: JevCompactionSettings;
 }
 
 const DEFAULTS = {
@@ -89,5 +92,6 @@ export function resolveCompactionSettings(
 			raw.summarizationMaxDurationMs > 0
 				? raw.summarizationMaxDurationMs
 				: undefined,
+		...(raw?.jev && typeof raw.jev === "object" ? { jev: raw.jev as JevCompactionSettings } : {}),
 	};
 }

@@ -1,5 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import type { IdealCompactionSettings } from "./compaction/ideal-compaction-settings.ts";
+import type { JevCompactionSettings } from "./extensions/builtin/compaction/jev/settings.ts";
 
 /** Token budgets overridden for one exact `provider/modelId` pair. */
 export interface CompactionModelOverride {
@@ -31,6 +32,8 @@ export interface CompactionSettings extends IdealCompactionSettings {
 	summarizationMaxDurationMs?: number;
 	/** Per-model token budgets, keyed by the exact `provider/modelId` pair (no wildcards). */
 	modelOverrides?: Record<string, CompactionModelOverride>;
+	/** Jev-guided verbatim compaction; enabled by default when `TYPESAFE_API_KEY` (or `apiKey`) resolves. */
+	jev?: JevCompactionSettings;
 }
 
 const DEFAULT_COMPACTION_TOKEN_SETTINGS: Required<CompactionModelOverride> = {
