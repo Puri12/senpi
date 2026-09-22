@@ -24,6 +24,7 @@ import {
 import * as idle from "./idle.ts";
 import * as idleRetry from "./idle-retry.ts";
 import { JevClient } from "./jev/client.ts";
+import { defaultJevCredentialStore, type JevCredentialStore, readStoredJevKey, storeJevKey } from "./jev/credential.ts";
 import { resolveJevCompactionSettings } from "./jev/settings.ts";
 import type { JevAsker } from "./jev/types.ts";
 import {
@@ -109,6 +110,8 @@ export interface CompactionExtensionDependencies extends OpenAiRemoteCompactionD
 	jevAsker?: JevAsker;
 	/** Test seam: environment used to resolve `TYPESAFE_API_KEY`. */
 	jevEnv?: NodeJS.ProcessEnv;
+	/** Test seam: credential store the Jev key is read from and written to (`/jev-login`). */
+	jevCredentialStore?: JevCredentialStore;
 }
 
 export default function compactionExtension(
@@ -130,14 +133,27 @@ export default function compactionExtension(
 	const getLogger = (ctx: ExtensionContext): CompactionLogger => (logger ??= createCompactionLogger(ctx.agentDir));
 
 	/**
+	 * Credential store for the Jev key, created lazily so a session that never
+	 * compacts (or never touches Jev) pays nothing. Held as one instance so a
+	 * `/jev-login` write is visible to the synchronous `getJevRoute` read.
+	 */
+	let jevCredentialStore: JevCredentialStore | undefined;
+	function getJevCredentialStore(): JevCredentialStore {
+		jevCredentialStore ??= remoteCompactionDependencies.jevCredentialStore ?? defaultJevCredentialStore();
+		return jevCredentialStore;
+	}
+
+	/**
 	 * Jev binding for every route. Resolved per call so a settings reload or a
 	 * key change takes effect on the next compaction; `undefined` keeps the LLM
-	 * summarizer.
+	 * summarizer. The key resolves from settings, then the stored `typesafe`
+	 * credential, then `TYPESAFE_API_KEY`.
 	 */
 	function getJevRoute(ctx: ExtensionContext): JevCompactionRoute | undefined {
 		const settings = resolveJevCompactionSettings(
 			ctx.getCompactionSettings().jev,
 			remoteCompactionDependencies.jevEnv ?? process.env,
+			readStoredJevKey(getJevCredentialStore()),
 		);
 		if (!settings.enabled) return undefined;
 		const asker =
@@ -1132,5 +1148,45 @@ export default function compactionExtension(
 		idleWarmupAttempt = 0;
 		speculativeJob?.controller.abort();
 		speculativeJob = undefined;
+	});
+
+	// Store the TypeSafe key in senpi's credential store so Jev compaction works
+	// without the TYPESAFE_API_KEY env var every session. Kept separate from
+	// `/login`, which only lists model providers; Jev is a compaction-only
+	// scoring service, not a conversation model.
+	//
+	// Guarded: minimal hosts (and many policy-test harnesses) build a `pi` without
+	// the optional command surface, and the command is not load-bearing for
+	// compaction itself.
+	if (typeof pi.registerCommand !== "function") return;
+	pi.registerCommand("jev-login", {
+		description: "Store the TypeSafe API key for Jev compaction",
+		argumentHint: "[key]",
+		handler: async (args, ctx) => {
+			const inline = args.trim();
+			const key =
+				inline.length > 0 ? inline : (await ctx.ui.input("TypeSafe API key", "paste your TypeSafe key"))?.trim();
+			if (!key) {
+				ctx.ui.notify("Jev login cancelled: no key entered", "warning");
+				return;
+			}
+			try {
+				storeJevKey(getJevCredentialStore(), key);
+			} catch (error) {
+				ctx.ui.notify(`Jev login failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+				return;
+			}
+			const jevSettings = resolveJevCompactionSettings(
+				ctx.getCompactionSettings().jev,
+				remoteCompactionDependencies.jevEnv ?? process.env,
+				key,
+			);
+			ctx.ui.notify(
+				jevSettings.enabled
+					? "TypeSafe key saved. Jev compaction is active."
+					: "TypeSafe key saved. Set compaction.jev.enabled to true to route compaction through Jev.",
+				"info",
+			);
+		},
 	});
 }

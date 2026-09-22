@@ -54,6 +54,26 @@ function fakeJev(answer: (name: string) => number, seen: Seen[] = []): JevAsker 
 	};
 }
 
+type JevLoginHandler = (args: string, ctx: ExtensionContext) => Promise<void> | void;
+
+interface FakeCredentialStore {
+	get(provider: string): { type: string; key?: string } | undefined;
+	set(provider: string, credential: { type: "api_key"; key: string }): void;
+	remove(provider: string): void;
+	snapshot(): Map<string, { type: string; key?: string }>;
+}
+
+function fakeCredentialStore(seed?: { provider: string; key: string }): FakeCredentialStore {
+	const data = new Map<string, { type: string; key?: string }>();
+	if (seed) data.set(seed.provider, { type: "api_key", key: seed.key });
+	return {
+		get: (provider) => data.get(provider),
+		set: (provider, credential) => void data.set(provider, credential),
+		remove: (provider) => void data.delete(provider),
+		snapshot: () => new Map(data),
+	};
+}
+
 interface Harness {
 	agentEnd: (event: AgentEndEvent, ctx: ExtensionContext) => Promise<void> | void;
 	beforeAgentStart: (event: BeforeAgentStartEvent, ctx: ExtensionContext) => Promise<unknown> | unknown;
@@ -61,12 +81,14 @@ interface Harness {
 		event: SessionBeforeCompactEvent,
 		ctx: ExtensionContext,
 	) => Promise<{ cancel?: boolean; reason?: string; compaction?: { summary: string; details?: unknown } } | undefined>;
+	jevLogin?: JevLoginHandler;
 	registration: FauxProviderRegistration;
 	ctx: ExtensionContext;
 	sessionManager: SessionManager;
 	applyCompaction: ReturnType<typeof vi.fn>;
 	seen: Seen[];
 	settings: typeof DEFAULT_COMPACTION_SETTINGS;
+	credentialStore: FakeCredentialStore;
 }
 
 const fileA = "export const a = 1;\n".repeat(400);
@@ -158,6 +180,7 @@ function createHarness(options: {
 	jev?: JevCompactionSettings;
 	env?: NodeJS.ProcessEnv;
 	usageTokens?: number;
+	credentialStore?: FakeCredentialStore;
 }): Harness {
 	const registration = registerFauxProvider();
 	registrations.push(registration);
@@ -187,15 +210,20 @@ function createHarness(options: {
 
 	const seen: Seen[] = [];
 	const asker = options.asker ?? fakeJev(options.answer ?? (() => 0.1), seen);
+	const credentialStore = options.credentialStore ?? fakeCredentialStore();
 
 	let agentEnd: Harness["agentEnd"] | undefined;
 	let beforeAgentStart: Harness["beforeAgentStart"] | undefined;
 	let sessionBeforeCompact: Harness["sessionBeforeCompact"] | undefined;
+	let jevLogin: JevLoginHandler | undefined;
 	const api = Object.assign(Object.create(null), {
 		on: (event: string, handler: unknown) => {
 			if (event === "agent_end") agentEnd = handler as Harness["agentEnd"];
 			if (event === "before_agent_start") beforeAgentStart = handler as Harness["beforeAgentStart"];
 			if (event === "session_before_compact") sessionBeforeCompact = handler as Harness["sessionBeforeCompact"];
+		},
+		registerCommand: (name: string, opts: { handler: JevLoginHandler }) => {
+			if (name === "jev-login") jevLogin = opts.handler;
 		},
 		appendEntry: vi.fn(),
 		getActiveTools: () => [],
@@ -204,7 +232,11 @@ function createHarness(options: {
 		events: { emit: vi.fn() },
 		sendMessage: vi.fn(),
 	}) as ExtensionAPI;
-	compactionExtension(api, { jevAsker: asker, jevEnv: options.env ?? { TYPESAFE_API_KEY: "test-key" } });
+	compactionExtension(api, {
+		jevAsker: asker,
+		jevEnv: options.env ?? { TYPESAFE_API_KEY: "test-key" },
+		jevCredentialStore: credentialStore,
+	});
 	if (!agentEnd) throw new Error("agent_end handler was not registered");
 	if (!beforeAgentStart) throw new Error("before_agent_start handler was not registered");
 	if (!sessionBeforeCompact) throw new Error("session_before_compact handler was not registered");
@@ -216,7 +248,7 @@ function createHarness(options: {
 	const ctx = {
 		hasUI: false,
 		mode: "tui",
-		ui: Object.assign(Object.create(null), { notify: vi.fn() }),
+		ui: Object.assign(Object.create(null), { notify: vi.fn(), input: vi.fn(async () => undefined) }),
 		cwd: process.cwd(),
 		isProjectTrusted: () => true,
 		sessionManager,
@@ -243,12 +275,14 @@ function createHarness(options: {
 		agentEnd,
 		beforeAgentStart,
 		sessionBeforeCompact,
+		jevLogin,
 		registration,
 		ctx,
 		sessionManager,
 		applyCompaction,
 		seen,
 		settings,
+		credentialStore,
 	};
 }
 
@@ -345,8 +379,8 @@ describe("jev compaction routes", () => {
 		expect(result?.compaction?.summary).toContain("llm summary");
 	});
 
-	it("stays on the LLM summarizer when no Jev key resolves", async () => {
-		const harness = createHarness({ env: {} });
+	it("stays on the LLM summarizer when no Jev key resolves anywhere", async () => {
+		const harness = createHarness({ env: {}, credentialStore: fakeCredentialStore() });
 		harness.registration.setResponses([
 			() => ({ role: "assistant", content: [{ type: "text", text: "llm summary" }] }) as never,
 		]);
@@ -355,6 +389,61 @@ describe("jev compaction routes", () => {
 
 		expect(harness.seen).toHaveLength(0);
 		expect(harness.registration.state.callCount).toBe(1);
+	});
+
+	it("routes through Jev on a stored credential when the env var is unset", async () => {
+		const harness = createHarness({
+			env: {},
+			credentialStore: fakeCredentialStore({ provider: "typesafe", key: "stored-jev-key" }),
+			answer: (name) => (name.endsWith("_t3") ? 0.9 : 0.1),
+		});
+
+		const result = await harness.sessionBeforeCompact(beforeCompactEvent(harness, "manual"), harness.ctx);
+
+		expect(harness.registration.state.callCount).toBe(0);
+		expect(harness.seen).toHaveLength(1);
+		expect(result?.compaction?.details).toMatchObject({ schema: JEV_SUMMARY_SCHEMA });
+	});
+
+	it("/jev-login stores the key and activates the route", async () => {
+		const store = fakeCredentialStore();
+		const harness = createHarness({
+			env: {},
+			credentialStore: store,
+			answer: (name) => (name.endsWith("_t3") ? 0.9 : 0.1),
+		});
+		if (!harness.jevLogin) throw new Error("jev-login command was not registered");
+
+		// Before login: no key, LLM summarizer runs.
+		harness.registration.setResponses([
+			() => ({ role: "assistant", content: [{ type: "text", text: "llm summary" }] }) as never,
+		]);
+		await harness.sessionBeforeCompact(beforeCompactEvent(harness, "manual"), harness.ctx);
+		expect(harness.seen).toHaveLength(0);
+		expect(harness.registration.state.callCount).toBe(1);
+
+		// Log in with an inline key; it is written to the store, never echoed.
+		const notify = harness.ctx.ui.notify as ReturnType<typeof vi.fn>;
+		await harness.jevLogin("sk-inline-jev", harness.ctx);
+		expect(store.snapshot().get("typesafe")).toEqual({ type: "api_key", key: "sk-inline-jev" });
+		expect(notify).toHaveBeenCalledWith(expect.stringContaining("Jev compaction is active"), "info");
+		expect(notify.mock.calls.every(([message]) => !String(message).includes("sk-inline-jev"))).toBe(true);
+
+		// After login: the same route now goes through Jev.
+		const result = await harness.sessionBeforeCompact(beforeCompactEvent(harness, "manual"), harness.ctx);
+		expect(harness.seen).toHaveLength(1);
+		expect(result?.compaction?.details).toMatchObject({ schema: JEV_SUMMARY_SCHEMA });
+	});
+
+	it("/jev-login prompts for the key when none is given inline", async () => {
+		const store = fakeCredentialStore();
+		const harness = createHarness({ env: {}, credentialStore: store });
+		if (!harness.jevLogin) throw new Error("jev-login command was not registered");
+		(harness.ctx.ui.input as ReturnType<typeof vi.fn>).mockResolvedValueOnce("  sk-prompted  ");
+
+		await harness.jevLogin("", harness.ctx);
+
+		expect(store.snapshot().get("typesafe")).toEqual({ type: "api_key", key: "sk-prompted" });
 	});
 
 	it("degrades like a failed summarization: transport failure cancels with a reason", async () => {

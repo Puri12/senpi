@@ -7,6 +7,7 @@ import {
 	toJevTranscript,
 } from "../../src/core/extensions/builtin/compaction/jev/adapter.ts";
 import { buildJevRequest, parseJevResponse } from "../../src/core/extensions/builtin/compaction/jev/client.ts";
+import { readStoredJevKey, storeJevKey } from "../../src/core/extensions/builtin/compaction/jev/credential.ts";
 import {
 	batchJevCalls,
 	decideJevCall,
@@ -19,6 +20,7 @@ import {
 	JevCompactionError,
 } from "../../src/core/extensions/builtin/compaction/jev/generator.ts";
 import {
+	JEV_CREDENTIAL_PROVIDER,
 	resolveJevApiKey,
 	resolveJevCompactionSettings,
 } from "../../src/core/extensions/builtin/compaction/jev/settings.ts";
@@ -334,12 +336,38 @@ describe("jev generator", () => {
 });
 
 describe("jev settings and client", () => {
-	it("resolves the key from a literal, an env reference, or TYPESAFE_API_KEY", () => {
-		expect(resolveJevApiKey("literal", {})).toBe("literal");
-		expect(resolveJevApiKey("$MY_KEY", { MY_KEY: "from-env" })).toBe("from-env");
+	it("resolves the key from settings, then the stored key, then TYPESAFE_API_KEY", () => {
+		// 1. configured value wins (literal or env reference)
+		expect(resolveJevApiKey("literal", {}, "stored")).toBe("literal");
+		expect(resolveJevApiKey("$MY_KEY", { MY_KEY: "from-env" }, "stored")).toBe("from-env");
 		expect(resolveJevApiKey("$" + "{MY_KEY}", { MY_KEY: "braced" })).toBe("braced");
+		// 2. a configured env reference to an unset var falls through to stored, then default
+		expect(resolveJevApiKey("$MISSING", {}, "stored")).toBe("stored");
+		expect(resolveJevApiKey("$MISSING", { TYPESAFE_API_KEY: "default" })).toBe("default");
+		// 3. no configured value: stored beats the env var
+		expect(resolveJevApiKey(undefined, { TYPESAFE_API_KEY: "default" }, "stored")).toBe("stored");
 		expect(resolveJevApiKey(undefined, { TYPESAFE_API_KEY: "default" })).toBe("default");
-		expect(resolveJevApiKey("$MISSING", {})).toBeUndefined();
+		expect(resolveJevApiKey(undefined, {})).toBeUndefined();
+	});
+
+	it("reads and stores the Jev key through a credential store", () => {
+		const data = new Map<string, { type: "api_key"; key: string }>();
+		const store = {
+			get: (provider: string) => data.get(provider),
+			set: (provider: string, credential: { type: "api_key"; key: string }) => void data.set(provider, credential),
+			remove: (provider: string) => void data.delete(provider),
+		};
+		expect(readStoredJevKey(store)).toBeUndefined();
+		storeJevKey(store, "sk-jev-123");
+		expect(data.get(JEV_CREDENTIAL_PROVIDER)).toEqual({ type: "api_key", key: "sk-jev-123" });
+		expect(readStoredJevKey(store)).toBe("sk-jev-123");
+		// a second store replaces rather than stacks
+		storeJevKey(store, "sk-jev-456");
+		expect(readStoredJevKey(store)).toBe("sk-jev-456");
+		expect(resolveJevCompactionSettings(undefined, {}, readStoredJevKey(store))).toMatchObject({
+			enabled: true,
+			apiKey: "sk-jev-456",
+		});
 	});
 
 	it("is enabled exactly when a key resolves unless overridden", () => {

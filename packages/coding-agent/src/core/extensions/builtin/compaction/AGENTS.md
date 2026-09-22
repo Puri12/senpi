@@ -35,7 +35,8 @@ compaction/
 │   ├── generator.ts          # generateJevCompaction — snapshot → CompactionResult (`senpi.compaction.jev.v1`)
 │   ├── adapter.ts            # AgentMessage[] ↔ Jev transcript; applyJevDecisions; renderJevSummary
 │   ├── state.ts, decide.ts   # State fitting (staged shrink), noul questions, keep/truncate/drop decisions
-│   ├── client.ts, settings.ts# System One HTTP transport; `compaction.jev` + TYPESAFE_API_KEY resolution
+│   ├── client.ts, settings.ts# System One HTTP transport; `compaction.jev` + key resolution (settings → stored → env)
+│   ├── credential.ts         # Read/write the `typesafe` key in AuthStorage (`/jev-login`)
 │   └── types.ts
 ├── lane-policy.ts            # SDK-native lane detection; `external-owner` structured ownership
 ├── deterministic-fallback.ts # Classification + construction when summarization fails outright
@@ -74,7 +75,8 @@ compaction/
 - **The 13 per-feature compaction fixtures** under `packages/coding-agent/test/fixtures/compaction/` map 1:1 onto these sub-policies — when you change a policy, update its fixture (and add a new one if you split a behavior).
 - **Restoration tracker is opt-in via `CompactionSettings`** — don't make it unconditional; tests rely on the on/off path.
 - **`session_compact` is the canonical event**; everything else (degradation, restoration) hangs off it.
-- **Jev is the default generator when a key resolves** (`compaction.jev`, `TYPESAFE_API_KEY`); it binds on the snapshot (`snapshot.jev`) so speculative, blocking, and core routes share one switch. Jev failures must map onto the existing summarizer failure classes (`SummaryGenerationError` / `SummaryRequestError`) so fallback and breaker behavior stay identical.
+- **Jev is the default generator when a key resolves** (`compaction.jev`, the stored `typesafe` credential via `/jev-login`, or `TYPESAFE_API_KEY`); it binds on the snapshot (`snapshot.jev`) so speculative, blocking, and core routes share one switch. Jev failures must map onto the existing summarizer failure classes (`SummaryGenerationError` / `SummaryRequestError`) so fallback and breaker behavior stay identical.
+- **The Jev key is read synchronously** in `getJevRoute` from one held `AuthStorage` instance, so a `/jev-login` write is visible to the next compaction without an async hop. `/jev-login` is separate from `/login` (which lists only model providers; Jev is a compaction-only scoring service).
 
 ## ANTI-PATTERNS
 

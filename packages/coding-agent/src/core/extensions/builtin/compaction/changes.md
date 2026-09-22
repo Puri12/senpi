@@ -1,3 +1,34 @@
+## Resolve the Jev key from the credential store, add /jev-login (2026-09-22)
+
+### What changed
+
+- New `jev/credential.ts`: `readStoredJevKey` / `storeJevKey` read and write a `typesafe` api_key
+  credential in senpi's `AuthStorage`, plus `defaultJevCredentialStore()` (one held `AuthStorage.create()`).
+- `jev/settings.ts` `resolveJevApiKey` / `resolveJevCompactionSettings` take an optional `storedKey`;
+  key priority is now `compaction.jev.apiKey` (literal or `$ENV`) → stored `typesafe` credential →
+  `TYPESAFE_API_KEY`. A configured `$ENV` reference to an unset var falls through instead of pinning
+  the route to "no key".
+- `index.ts`: holds one credential store (test seam `jevCredentialStore`), reads it synchronously in
+  `getJevRoute`, and registers a `/jev-login [key]` command that stores the key via `ctx.ui.input`
+  (never echoed) and reports whether the route is now active.
+
+### Why
+
+- Requiring `TYPESAFE_API_KEY` in the environment every session is friction. Storing the key in
+  `auth.json` (the same store every provider uses) lets a user log in once. `/login` only lists model
+  providers, and Jev is a compaction-only scoring service, so a dedicated `/jev-login` avoids
+  polluting the model selector with a non-conversational "model".
+
+### Why an extension could not handle it
+
+- This IS the builtin compaction extension; the key must be resolved on the synchronous snapshot path
+  it already owns.
+
+### Expected merge conflict zones
+
+- LOW: `jev/settings.ts` resolver signature, `index.ts` `getJevRoute` + command registration block.
+- `test/compaction/jev-compaction.test.ts`, `test/compaction/jev-compaction-routes.test.ts`.
+
 ## Hold a model switch until the next send can compact for it (2026-09-20)
 
 ### What changed

@@ -248,7 +248,14 @@ remote compaction route and the Claude SDK lane are unaffected.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `compaction.jev.enabled` | boolean | `true` when a key resolves | Route compaction through Jev; `false` keeps the LLM summarizer |
-| `compaction.jev.apiKey` | string | `TYPESAFE_API_KEY` | Literal key or `$ENV_VAR` / `${ENV_VAR}` reference |
+| `compaction.jev.apiKey` | string | (see below) | Literal key or `$ENV_VAR` / `${ENV_VAR}` reference |
+
+The key resolves in priority order: `compaction.jev.apiKey` (a literal or a `$NAME` reference), then a
+key stored in senpi's credential store, then the `TYPESAFE_API_KEY` environment variable. Store a key
+in the credential store with **`/jev-login`** (paste at the prompt, or `/jev-login <key>`); it is saved
+under the `typesafe` provider in `auth.json` so you do not need the environment variable every session.
+A configured `$NAME` reference to an unset variable falls through to the stored key and then the
+environment, so a stale reference never pins the route to "no key".
 | `compaction.jev.model` | string | `jev-latest` | Jev model name |
 | `compaction.jev.baseUrl` | string | System One endpoint | Override the endpoint |
 | `compaction.jev.keepThreshold` | number | `0.5` | Minimum keep probability for a call or result to stay |
