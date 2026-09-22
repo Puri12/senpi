@@ -23,6 +23,7 @@ The editor can be replaced temporarily by built-in UI such as `/settings` or by 
 | Path completion | Press Tab to complete paths |
 | Multi-line input | Shift+Enter, or Ctrl+Enter on Windows Terminal |
 | Copy response | Ctrl+X copies the selected message in `/tree`; otherwise it copies the last assistant message, or the active fullscreen text selection when `fullscreenCopyOnSelect` is disabled |
+| Edit response | Ctrl+E on an assistant message in `/tree` opens it in the editor; submitting continues the session from the edited copy |
 | Images | Paste with Ctrl+V, Alt+V on Windows, or drag into the terminal |
 | Shell command | `!command` runs and sends output to the model |
 | Hidden shell command | `!!command` runs without sending output to the model |
@@ -50,7 +51,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/settings` | Theme, message delivery, transport, and other preferences |
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
-| `/name <name>` | Set session display name |
+| `/rename [name]` | Rename the current session (`/name` is an alias) |
 | `/session` | Show session file, ID, messages, tokens, and cost |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/trust` | Save project trust decision for future sessions |
@@ -113,7 +114,7 @@ senpi --fork <path|id>    # Fork a session into a new session file
 Useful session commands:
 
 - `/session` shows the current session file and ID.
-- `/tree` navigates the in-file session tree and can summarize abandoned branches.
+- `/tree` navigates the in-file session tree and can summarize abandoned branches. Ctrl+E on an assistant entry edits that response in place of the original (the original stays in the file on an abandoned branch; tool calls in the edited response are dropped).
 - `/fork` creates a new session from an earlier user message.
 - `/clone` duplicates the current active branch into a new session file.
 - `/compact` summarizes older messages to free context.
@@ -239,6 +240,14 @@ cat README.md | senpi -p "Summarize this text"
 | `--no-tools`, `-nt` | Disable all tools |
 
 Built-in tools: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`.
+
+#### `grep` tool contract
+
+Use `tool.grep({ pattern, path, glob, ignoreCase, literal, context, before, after, mode, limit, skip, timeoutMs, hidden, gitignore })` inside eval. `pattern` is required; `path` accepts a file, directory, array, or a `<file>:L1-L2` selector. `glob` accepts positive patterns and `!` exclusions. `mode` is `content` (default), `count`, or `files`; `limit` and `skip` paginate file results. `before`/`after` override `context`.
+
+Content output uses `path` blocks with `N: match` and `N- context` rows, followed by a footer such as `[grep: matches=2 files=2 searched=42 elapsedMs=8 engine=native nextSkip=none]`. The footer is always present. Tool results include `details` v1 with structured matches, file counts, scan status, and pagination metadata.
+
+The engine is selected automatically. `SENPI_GREP_ENGINE=auto|native|rg` selects the preferred engine, and `SENPI_GREP_NATIVE_PATH` overrides the native addon path. Native search honors filesystem policy and ignore files; ripgrep is the fallback.
 
 ### Resource Options
 

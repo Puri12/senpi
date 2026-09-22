@@ -640,6 +640,11 @@ describe("estimateTokens base64 weighting", () => {
 });
 
 describe("shouldCompact", () => {
+	it("case 2: applies the effective reserve and preserves the scaling opt-out", () => {
+		const settings: CompactionSettings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 };
+		expect(shouldCompact(980_000, 1_000_000, settings)).toBe(true);
+		expect(shouldCompact(980_000, 1_000_000, { ...settings, reserveScalingEnabled: false })).toBe(false);
+	});
 	it("should return true when context exceeds threshold", () => {
 		const settings: CompactionSettings = {
 			enabled: true,

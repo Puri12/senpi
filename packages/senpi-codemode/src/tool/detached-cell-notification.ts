@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import type { EvalDetachedCellNotification, EvalDetachedCellSnapshot } from "./detached-cell-manager.ts";
+import { interruptionStateNote, unknownInterruptionStateNote } from "./interrupt-note.ts";
 
 const NOTIFICATION_TAIL_BYTES = 512;
 
@@ -68,17 +69,17 @@ function textContent(cell: EvalDetachedCellSnapshot): string {
 
 function outcomeOf(cell: EvalDetachedCellSnapshot): string {
 	if (cell.hardLimitSeconds !== undefined) return `was killed at the ${cell.hardLimitSeconds}s hard limit`;
+	if (cell.runBudgetSeconds !== undefined)
+		return `was killed after exhausting its ${cell.runBudgetSeconds}s run budget (own execution time; host tool calls excluded)`;
 	if (cell.state === "completed") return "completed";
 	if (cell.state === "cancelled") return "cancelled";
 	return "failed";
 }
 
 function stateNoteOf(cell: EvalDetachedCellSnapshot): string {
-	if (cell.state === "cancelled" && cell.language === "js")
-		return "JavaScript worker was restarted; VM state was lost.";
-	if (cell.state === "cancelled" && cell.language === "py")
-		return "Python kernel was interrupted; its existing variables are preserved.";
-	return "Kernel state updated - variables are available to the next eval cell.";
+	if (cell.state !== "cancelled") return "Kernel state updated - variables are available to the next eval cell.";
+	const note = interruptionStateNote(cell.language, cell.stateRetained) ?? unknownInterruptionStateNote(cell.language);
+	return cell.interruptNote === undefined ? note : `${note} ${cell.interruptNote.trim()}`;
 }
 
 function safeCellId(cellId: string): string {

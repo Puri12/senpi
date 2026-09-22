@@ -217,7 +217,13 @@ function sendJson(response: ServerResponse, status: number, body: JsonReply): vo
 }
 
 function bridgeError(error: unknown): BridgeError {
-	if (error instanceof Error) return { name: error.name, message: error.message, stack: error.stack };
+	if (error instanceof Error)
+		return {
+			name: error.name,
+			message: error.message,
+			stack: error.stack,
+			...("code" in error && typeof error.code === "string" ? { code: error.code } : {}),
+		};
 	return { message: String(error) };
 }
 

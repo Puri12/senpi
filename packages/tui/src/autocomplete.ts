@@ -2,7 +2,12 @@ import { spawn } from "child_process";
 import { readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, dirname, join } from "path";
-import { getDollarInvocationContext, getDollarInvocationSuggestions } from "./dollar-invocation-autocomplete.ts";
+import {
+	findDollarSkillMentions,
+	getDollarInvocationContext,
+	getDollarInvocationSuggestions,
+	knownSkillNames,
+} from "./dollar-invocation-autocomplete.ts";
 import { getSlashCommandSuggestions } from "./slash-command-autocomplete.ts";
 
 const PATH_DELIMITERS = new Set([" ", "\t", '"', "'", "="]);
@@ -244,6 +249,12 @@ export interface AutocompleteSuggestions {
 	prefix: string; // What we're matching against (e.g., "/" or "src/")
 }
 
+/** Line-local character range, `end` exclusive. */
+export interface MentionRange {
+	readonly start: number;
+	readonly end: number;
+}
+
 export interface AutocompleteProvider {
 	/** Characters that should naturally trigger this provider at token boundaries. */
 	triggerCharacters?: string[];
@@ -273,6 +284,12 @@ export interface AutocompleteProvider {
 
 	// Check if file completion should trigger for explicit Tab completion
 	shouldTriggerFileCompletion?(lines: string[], cursorLine: number, cursorCol: number): boolean;
+
+	/**
+	 * Ranges on one logical line that resolve to a known mention (for example
+	 * a `$skill` token). The editor styles them through `EditorTheme.mention`.
+	 */
+	getMentionRanges?(line: string): readonly MentionRange[];
 }
 
 // Combined provider that handles both slash commands and file paths
@@ -285,6 +302,10 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 		this.commands = commands;
 		this.basePath = basePath;
 		this.fdPath = fdPath;
+	}
+
+	getMentionRanges(line: string): readonly MentionRange[] {
+		return findDollarSkillMentions(line, knownSkillNames(this.commands)).map(({ start, end }) => ({ start, end }));
 	}
 
 	async getSuggestions(

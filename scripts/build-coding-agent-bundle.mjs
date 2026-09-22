@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { isBuiltin } from "node:module";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,40 +12,66 @@ const codingAgentDir = join(repoRoot, "packages", "coding-agent");
 const aiDistDir = join(repoRoot, "packages", "ai", "dist");
 const codingAgentDistDir = join(codingAgentDir, "dist");
 const bundleDir = join(codingAgentDistDir, "bundle");
+// undici's CacheStorage instantiates at module init and calls
+// worker_threads.markAsUncloneable, a Node >= 23 API that Bun 1.3.x lacks (#1806).
+// Every emitted file evaluates this prologue before any bundled module code.
+const runtimeGuards =
+	'{ const __piWorkerThreads = require("node:worker_threads"); if (typeof __piWorkerThreads.markAsUncloneable !== "function") { __piWorkerThreads.markAsUncloneable = () => {}; } }';
 const banner = {
-	js: 'import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url);',
+	js: `import { createRequire as __piCreateRequire } from "node:module"; const require = __piCreateRequire(import.meta.url); ${runtimeGuards}`,
 };
 const allowedExternalPackages = new Set([
+	"@earendil-works/chord",
+	"@earendil-works/chord/bundler",
+	"@earendil-works/chord/context",
+	"@earendil-works/chord/delta",
+	"@earendil-works/chord/node",
 	"@silvia-odwyer/photon-node",
-	"jiti",
+	// The native PTY loader resolves its manifest and prebuilds beside its package.
+	"@earendil-works/pi-pty",
+	// Runtime-guarded Bun lock adapter; Node uses node:sqlite instead.
+	"bun:sqlite",
+	// Runtime-guarded host child reaper bindings; a Node host turns the reaper off.
+	"bun:ffi",
+	// Optional ws accelerators; kept external so the binding loader stays out of the bundle.
+	"bufferutil",
+	"utf-8-validate",
+	// linkedom's optional native canvas stays package-relative, with its JS fallback.
+	"canvas",
 	// Optional native accelerators. Their callers fall back to JavaScript when absent.
 	"bufferutil",
 	"utf-8-validate",
+	// Optional native proxy authentication. Its caller reports an install hint when absent.
+	"kerberos",
 	// Optional debug output coloring.
 	"supports-color",
 ]);
 
-const lazyJitiPlugin = {
-	name: "lazy-jiti-transform",
+// Only standalone Bun isolates register these modules. esbuild follows the worker's
+// literal import even behind isBunBinary; keep that unreachable graph out of Node.
+const bunRuntimeModulesPlugin = {
+	name: "omit-bun-runtime-modules",
 	setup(build) {
-		build.onResolve({ filter: /^jiti\/static$/ }, () => ({
-			namespace: "lazy-jiti",
-			path: "jiti/static",
+		build.onResolve({ filter: /[/\\\\]bun[/\\\\]runtime-modules\.(ts|js)$/ }, (args) => ({
+			namespace: "bun-runtime-modules",
+			path: args.path,
 		}));
-		build.onLoad({ filter: /.*/, namespace: "lazy-jiti" }, () => ({
-			contents: `
-import { createRequire } from "node:module";
-
-const require = createRequire(import.meta.url);
-let createJitiImpl;
-
-export function createJiti(...args) {
-	createJitiImpl ??= require("jiti").createJiti;
-	return createJitiImpl(...args);
-}
-`,
+		build.onLoad({ filter: /.*/, namespace: "bun-runtime-modules" }, () => ({
+			contents: "export {};",
 			loader: "js",
 		}));
+	},
+};
+
+// Bun's file attribute is not a standard Node import attribute. Let esbuild
+// emit the asset and its path rather than parse it as a JavaScript module.
+const fileAttributePlugin = {
+	name: "file-attribute",
+	setup(build) {
+		build.onLoad({ filter: /./, namespace: "file" }, (args) => {
+			if (args.with.type !== "file") return undefined;
+			return { contents: readFileSync(args.path), loader: "file" };
+		});
 	},
 };
 
@@ -79,7 +105,19 @@ function commonBuildOptions() {
 		banner,
 		bundle: true,
 		define: { PI_BUNDLED_NODE: "true" },
-		external: ["@silvia-odwyer/photon-node"],
+		external: [
+			"@earendil-works/chord",
+			"@silvia-odwyer/photon-node",
+			"@earendil-works/pi-pty",
+			"bun:sqlite",
+			"bun:ffi",
+			// ws resolves these native accelerators when they happen to be installed.
+			// They load their binding through node-gyp-build, whose computed require
+			// esbuild cannot analyse, so bundling them leaves an unresolvable external.
+			"bufferutil",
+			"canvas",
+			"utf-8-validate",
+		],
 		format: "esm",
 		legalComments: "none",
 		logLevel: "warning",
@@ -87,11 +125,7 @@ function commonBuildOptions() {
 		minifySyntax: true,
 		minifyWhitespace: true,
 		platform: "node",
-		// The source uses jiti/static so Bun embeds its Babel transform. The Node
-		// package replaces it with a synchronous lazy require so jiti loads only
-		// when importing an extension; Babel remains deferred until a cache miss
-		// needs transformation.
-		plugins: [lazyJitiPlugin, httpsProxyAgentNamedExportPlugin],
+		plugins: [httpsProxyAgentNamedExportPlugin, bunRuntimeModulesPlugin, fileAttributePlugin],
 		sourcemap: false,
 		target: "node22.19",
 		// Do not apply the monorepo's source-oriented path aliases while bundling
@@ -182,8 +216,19 @@ const lazyResult = await build({
 	entryPoints: {
 		anthropic: join(aiDistDir, "auth", "oauth", "anthropic.js"),
 		"bedrock-converse-stream": join(aiDistDir, "api", "bedrock-converse-stream.js"),
+		cursor: join(aiDistDir, "auth", "oauth", "cursor.js"),
+		"cursor-agent": join(aiDistDir, "api", "cursor-agent.js"),
+		devin: join(aiDistDir, "auth", "oauth", "devin.js"),
+		"devin-agent": join(aiDistDir, "api", "devin-agent.js"),
 		"github-copilot": join(aiDistDir, "auth", "oauth", "github-copilot.js"),
+		// `supervisor-route.js` defers this with a dynamic `import("./host-lifecycle.js")`
+		// so the RPC host graph stays out of every launch. `session-worker` is bundled
+		// here with splitting off, which leaves that specifier unresolved beside the
+		// emitted file - so the implementation has to exist there under that exact name,
+		// or `host ensure` dies with "Module not found .../chunks/host-lifecycle.js".
+		"host-lifecycle": join(codingAgentDistDir, "modes", "rpc", "host-lifecycle.js"),
 		"image-resize-worker": join(codingAgentDistDir, "utils", "image-resize-worker.js"),
+		"session-worker": join(codingAgentDistDir, "modes", "rpc", "session-worker.js"),
 		"kimi-coding": join(aiDistDir, "auth", "oauth", "kimi-coding.js"),
 		"openai-codex": join(aiDistDir, "auth", "oauth", "openai-codex.js"),
 		openrouter: join(aiDistDir, "auth", "oauth", "openrouter.js"),

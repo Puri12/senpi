@@ -11,6 +11,7 @@ import { JuliaKernel } from "../kernels/jl/kernel.ts";
 import { JavaScriptKernel } from "../kernels/js/context-manager.ts";
 import { PythonKernel } from "../kernels/py/kernel.ts";
 import { RubyKernel } from "../kernels/rb/kernel.ts";
+import type { SessionEnvironment } from "../kernels/session-env.ts";
 import { marshalToolResult } from "../tool/image.ts";
 import type { EvalKernel, EvalKernelManager, EvalLanguage, ExecuteTool } from "../tool/types.ts";
 
@@ -40,6 +41,8 @@ export interface CreateCodemodeSessionManagerOptions {
 	readonly localRoots?: Readonly<Record<string, string>>;
 	/** Session-adjacent directory used for persisted eval artifacts. */
 	readonly artifactsDir?: string;
+	/** Per-session PI_* values exposed to every kernel and the children it spawns. */
+	readonly sessionEnv?: SessionEnvironment;
 	readonly executeTool: ExecuteTool;
 	readonly listTools?: () => readonly EvalSchemaToolInfo[];
 	readonly complete: (request: CompletionRequest, ctx: ExtensionContext) => Promise<CompletionResult>;
@@ -212,6 +215,9 @@ class DefaultCodemodeSessionManager implements CodemodeSessionManager {
 				cwd: this.#options.cwd,
 				parallelPoolWidth,
 				onMessage,
+				hostToolNames: () => this.#options.listTools?.().map((tool) => tool.name) ?? [],
+				foreignLanguageNames: () => this.#foreignKernelToolNames(),
+				...(this.#options.sessionEnv ? { sessionEnv: this.#options.sessionEnv } : {}),
 				...(localRoots ? { localRoots: { ...localRoots } } : {}),
 				...(this.#options.artifactsDir ? { artifactsDir: this.#options.artifactsDir } : {}),
 			});
@@ -230,6 +236,7 @@ class DefaultCodemodeSessionManager implements CodemodeSessionManager {
 				interpreterPath: detected.path,
 				sessionId: this.#options.sessionId,
 				cwd: this.#options.cwd,
+				...(this.#options.sessionEnv ? { sessionEnv: this.#options.sessionEnv } : {}),
 				connection,
 				onMessage,
 			});
@@ -239,6 +246,7 @@ class DefaultCodemodeSessionManager implements CodemodeSessionManager {
 				command: detected.path,
 				sessionId: this.#options.sessionId,
 				cwd: this.#options.cwd,
+				...(this.#options.sessionEnv ? { sessionEnv: this.#options.sessionEnv } : {}),
 				connection,
 				onMessage,
 			});
@@ -247,9 +255,19 @@ class DefaultCodemodeSessionManager implements CodemodeSessionManager {
 			command: detected.path,
 			sessionId: this.#options.sessionId,
 			cwd: this.#options.cwd,
+			...(this.#options.sessionEnv ? { sessionEnv: this.#options.sessionEnv } : {}),
 			connection,
 			onMessage,
 		});
+	}
+
+	#foreignKernelToolNames(): string[] {
+		const names: string[] = [];
+		for (const [language, kernel] of this.#kernels) {
+			if (language === "js") continue;
+			names.push(...(kernel.listKernelToolNames?.() ?? []));
+		}
+		return names;
 	}
 
 	#contextFor(signal: AbortSignal): ExtensionContext {

@@ -28,6 +28,7 @@ export const BUILT_IN_PROVIDER_DISPLAY_NAMES: Record<string, string> = {
 	ollama: "Ollama Cloud",
 	openrouter: "OpenRouter",
 	together: "Together AI",
+	venice: "Venice AI",
 	"vercel-ai-gateway": "Vercel AI Gateway",
 	xai: "xAI",
 	zai: "ZAI Coding Plan (Global)",

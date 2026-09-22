@@ -22,6 +22,7 @@ Use `/login` in interactive mode, then select a provider:
 - GitHub Copilot
 - xAI (Grok/X subscription)
 - OpenRouter (OAuth-minted API key billed from OpenRouter credits)
+- Kimi Code (kimi.com / kimi.ai subscriptions)
 - Radius
 - Cursor (Pro/Ultra/Teams) — authentication only for now, see below
 
@@ -35,6 +36,10 @@ Use `/logout` to clear credentials. Tokens are stored in `~/.senpi/agent/auth.js
 ### Claude Pro/Max
 
 Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party harness usage draws from [extra usage](https://claude.ai/settings/usage) and is billed per token, not against Claude plan limits.
+
+- Run `/login anthropic` to open the browser flow. The login listens on loopback port 53692 when it is free and on an ephemeral port otherwise, so a second session on the same machine (another TUI, an RPC host, an abandoned login) can log in at the same time; the auth URL always names the port that is actually listening.
+- If the browser lands on a page saying the login belongs to a different session or an earlier attempt, that page's address was sent to another login's listener: paste the full address from the address bar into the session whose prompt is still waiting, or run the login again from that session.
+- A login that receives neither the browser callback nor a pasted redirect URL for 10 minutes fails with a timeout and releases its port; run `/login anthropic` again.
 
 ### Claude SDK OAuth
 
@@ -101,7 +106,7 @@ If your Claude Pro/Max subscription usage through `claude-sdk-oauth` feels unexp
    | Anthropic-compatible providers (kimi-coding, fireworks, gateways) | 5 minutes | The 1h TTL is gated on the native `api.anthropic.com` base URL, so these lanes stay short. | `cacheRetention` |
 
    Override precedence: `cacheRetention` in `models.json` / the model catalog wins over everything. `PI_CACHE_RETENTION=long` selects long; any other set value forces short; unset falls back to the lane default above.
-5. **Goal-monitor timing.** The goal monitor's continuation backstop is derived from the model's cache-safe wait (TTL minus `promptCache.safetyBufferSeconds`, default 30), capped by `promptCache.goalBackstopMaxSeconds` (default 3570), instead of a fixed 4 minutes. The default 5m lanes wake every ~4m30s; a supported lane explicitly configured for 1h retention can wait up to 59m30s. Cache-warm notices show which warm iteration you are on.
+5. **Goal-monitor timing.** While at least one wake source is live, the goal monitor arms one periodic backstop of `promptCache.goalBackstopMaxSeconds` (default 270, so 4m30s: the 5-minute Anthropic prompt-cache TTL minus the 30s safety buffer; hard-capped at 1h). The normal resumption is event-driven: a monitor event or a finished background job starts a turn, and when the last wake source drains, exactly one continuation is queued about a second later. The backstop is the floor underneath that: a wake source can be misconfigured (a filter that never matches, a stream that never ends), so the goal re-checks at least once per backstop interval instead of waiting an hour on a source that will never deliver. Each backstop firing is a full main-model turn that re-sends the accumulated context; at the default it lands inside the prompt-cache TTL, so the cache stays warm. Raise `goalBackstopMaxSeconds` (up to 3600) to trade that re-check frequency for cost on a wait you trust, and use `promptCache.keepAlive` (opt-in, off by default) to keep the cache warm across such a long backstop. Cache-warm notices show which warm iteration you are on.
 6. **Wake sources that hold the goal backstop.** Anything that can wake a parked session publishes a `wake_source_state` event (`{source, activeCount}`): terminal monitors (`terminal-monitors`), background bash sessions including auto-detached and killed ones (`terminal-background-sessions`), detached `eval` cells (`senpi-codemode`), and omo-senpi background task children plus owned team members (`senpi-task`). The goal extension sums every source, so a goal waits inside the prompt-cache TTL while ANY of them is on duty instead of continuing immediately. The legacy `terminal_monitor_state` event is still emitted for external consumers and is folded onto the same `terminal-monitors` count.
 7. **Directive-block deduplication.** As of v2026.8.4, the flatten serialization collapses repeated `<ultrawork-mode>` directive blocks to a single copy, preventing the issue-#494 scenario where duplicated ~17KB directive blocks consumed up to 73% of the re-sent prompt. The continuity observation reports how many were collapsed and the payload size.
 
@@ -131,6 +136,13 @@ Upstreams that require explicit cache breakpoints get `cache_control` blocks thr
 #### Moonshot / Kimi prompt caching
 
 senpi sends `prompt_cache_key` (set to the session id) on Moonshot requests. Kimi documents the field as required for the Kimi Code Plan and recommended for any multi-turn agent ([Kimi context caching](https://platform.kimi.ai/docs/guide/use-context-caching-feature-of-kimi-api)). Kimi reports cache hits as a flat `usage.cached_tokens` field, which senpi parses as cache-read tokens.
+
+### Kimi Code
+
+- Run `/login kimi-coding`, then select **Sign in with Kimi Code** and pick the service that hosts your account: **Mainland China (kimi.com)** or **Outside mainland China (kimi.ai)**
+- The region is stored with the credential; token refresh and model requests follow it (`auth.kimi.ai` + `api.kimi.ai/coding` for international accounts), so a `.ai` login keeps working after restarts and env changes
+- **Use an API key** asks the same region question and routes `KIMI_API_KEY` requests by it; `KIMI_CODE_REGION=global` (or `mainland-cn`) answers it for headless setups
+- `KIMI_CODE_OAUTH_HOST` / `KIMI_OAUTH_HOST` still override the auth host for new logins and for credentials saved before regions existed; a host other than the two official ones is kept verbatim and needs a `models.json` `baseUrl` for inference
 
 ### Radius
 
@@ -211,6 +223,35 @@ The provider streams through Ollama's OpenAI-compatible `/v1/chat/completions` e
 Existing local Ollama configurations remain supported. When an `ollama` provider in `models.json` includes
 an explicit `models` catalog, that catalog takes precedence and Senpi does not run Ollama Cloud discovery.
 
+## B.AI
+
+Use `/login bai` to store an API key, or export `BAI_API_KEY`. B.AI model availability is credential-scoped,
+so refresh the catalog after login:
+
+```bash
+export BAI_API_KEY=...
+senpi update --models
+senpi --provider bai --model gpt-5.6-sol
+```
+
+Senpi discovers available IDs from `https://api.b.ai/v1/models` and enriches classified chat models with
+B.AI's documented context, output, input modality, reasoning-level, and standard pricing metadata. Because that
+list is credential-scoped, a model you are not entitled to never appears.
+
+B.AI serves one API key over three protocols and documents several models on more than one of them, so the
+endpoint is a client choice rather than a per-model property. Senpi pins one protocol per model: GPT and
+DeepSeek use OpenAI Responses (the two families B.AI names for that endpoint), Claude uses Anthropic Messages,
+and the remaining chat families use OpenAI Chat Completions.
+
+B.AI rejects a function tool whose root parameters schema declares no `type`. On the Responses endpoint Senpi
+merges such a union root into a single object schema so the tool keeps its parameters; the Chat Completions and
+Messages paths already do the same normalization for every provider. Image-only IDs such as `gpt-image-2` remain
+on B.AI's image API and are not listed as chat models.
+
+The catalog records B.AI's standard reference prices in USD per 1M tokens. They exclude temporary promotions,
+top-up bonuses, DeepSeek idle-period rates, and account benefits, so B.AI's final billing record remains
+authoritative.
+
 ## API Keys
 
 ### Environment Variables or Auth File
@@ -228,6 +269,7 @@ senpi
 | Ant Ling | `ANT_LING_API_KEY` | `ant-ling` |
 | Azure OpenAI Responses | `AZURE_OPENAI_API_KEY` | `azure-openai-responses` |
 | OpenAI | `OPENAI_API_KEY` | `openai` |
+| B.AI | `BAI_API_KEY` | `bai` |
 | Ollama Cloud | `OLLAMA_API_KEY` | `ollama` |
 | DeepSeek | `DEEPSEEK_API_KEY` | `deepseek` |
 | NVIDIA NIM | `NVIDIA_API_KEY` | `nvidia` |
@@ -236,6 +278,7 @@ senpi
 | Mistral | `MISTRAL_API_KEY` | `mistral` |
 | Groq | `GROQ_API_KEY` | `groq` |
 | Cerebras | `CEREBRAS_API_KEY` | `cerebras` |
+| Venice AI | `VENICE_API_KEY` | `venice` |
 | Cloudflare AI Gateway | `CLOUDFLARE_API_KEY` (+ `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID`) | `cloudflare-ai-gateway` |
 | Cloudflare Workers AI | `CLOUDFLARE_API_KEY` (+ `CLOUDFLARE_ACCOUNT_ID`) | `cloudflare-workers-ai` |
 | xAI | `XAI_API_KEY` | `xai` |
@@ -251,7 +294,7 @@ senpi
 | Fireworks | `FIREWORKS_API_KEY` | `fireworks` |
 | Together AI | `TOGETHER_API_KEY` | `together` |
 | Baseten | `BASETEN_API_KEY` | `baseten` |
-| Kimi For Coding | `KIMI_API_KEY` | `kimi-coding` |
+| Kimi For Coding | `KIMI_API_KEY` (+ `KIMI_CODE_REGION`) | `kimi-coding` |
 | MiniMax | `MINIMAX_API_KEY` | `minimax` |
 | MiniMax (China) | `MINIMAX_CN_API_KEY` | `minimax-cn` |
 | Qwen Token Plan (existing catalog) | `QWEN_TOKEN_PLAN_API_KEY` | `qwen-token-plan` |
@@ -267,7 +310,7 @@ senpi
 
 OpenGateway is an OpenAI-compatible multi-provider gateway serving OpenAI, Anthropic, Google, xAI, Moonshot, DeepSeek, ZAI, MiniMax, and Qwen models through one API key. Issue a key at <https://opengateway.ai/api-keys>, then `/login` and select **OpenGateway**, or export `OPENGATEWAY_API_KEY`. The data plane is `https://apis.opengateway.ai`; model ids use the gateway's `owner/model` format (for example `moonshotai/kimi-k3`, `anthropic/claude-fable-5`).
 
-Reference for environment variables and `auth.json` keys: [`const envMap`](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/env-api-keys.ts) in [`packages/ai/src/env-api-keys.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/ai/src/env-api-keys.ts).
+Reference for environment variables and `auth.json` keys: [`const envMap`](https://github.com/earendil-works/pi/blob/main/packages/ai/src/env-api-keys.ts) in [`packages/ai/src/env-api-keys.ts`](https://github.com/earendil-works/pi/blob/main/packages/ai/src/env-api-keys.ts).
 
 #### Auth File
 

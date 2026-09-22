@@ -24,6 +24,7 @@ import type {
 } from "@earendil-works/pi-ai/compat";
 import { streamSimple } from "@earendil-works/pi-ai/compat";
 import { estimateContextTokens as estimateProviderContextTokens } from "@earendil-works/pi-ai/utils/estimate";
+import { resolveEffectiveReserveTokens } from "../extensions/builtin/compaction/policy.ts";
 import { convertToLlm, filterContextExcludedMessages, isContextExcludedCustomMessage } from "../messages.ts";
 import {
 	buildSessionContext,
@@ -31,14 +32,18 @@ import {
 	type SessionEntry,
 	sessionEntryToContextMessages,
 } from "../session-manager.ts";
-import type { CompactionSettings } from "./compaction-settings.ts";
+import type { CompactionSettings as BaseCompactionSettings } from "./compaction-settings.ts";
 
-export { type CompactionSettings, DEFAULT_COMPACTION_SETTINGS } from "./compaction-settings.ts";
+export type CompactionSettings = BaseCompactionSettings & {
+	/** Optional "provider/model" override for the compaction summarization model. */
+	model?: string;
+};
+export { DEFAULT_COMPACTION_SETTINGS } from "./compaction-settings.ts";
 
 import {
 	consumeStreamWithIdleTimeout,
 	DEFAULT_SUMMARIZATION_IDLE_TIMEOUT_MS,
-	DEFAULT_SUMMARIZATION_MAX_DURATION_MS,
+	summarizationMaxDurationMs,
 } from "./stream-watchdog.ts";
 import {
 	contentTextForSummary,
@@ -331,7 +336,7 @@ export function estimateContextTokens(messages: AgentMessage[]): ContextUsageEst
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled) return false;
-	return contextTokens > contextWindow - settings.reserveTokens;
+	return contextTokens > contextWindow - resolveEffectiveReserveTokens(contextWindow, settings);
 }
 
 // ============================================================================
@@ -722,6 +727,7 @@ export async function completeSummarization(
 	streamFn?: SummarizationStreamFn,
 	retry?: RetryPolicy,
 	callbacks?: RetryCallbacks,
+	summarizationMaxDurationMsOverride?: number,
 ): Promise<AssistantMessage> {
 	// Summary requests retain the fork's request-identity split: each request gets a
 	// fresh identity while affinity follows the caller. Cache-friendly callers may
@@ -733,6 +739,14 @@ export async function completeSummarization(
 		sessionId: uuidv7(),
 	};
 	const callerSignal = options.signal;
+	// The 120s floor was tuned for healthy summaries; a large session feeds the
+	// summarizer hundreds of thousands of tokens, which legitimately takes longer
+	// on slower providers (#1068). Scale the per-attempt budget with the estimated
+	// input size so compaction cannot deadlock purely on its own wall clock.
+	const maxDurationMs = summarizationMaxDurationMs(
+		estimateProviderContextTokens(context).tokens,
+		summarizationMaxDurationMsOverride,
+	);
 	const produce = async (): Promise<AssistantMessage> => {
 		// Request-local controller: the idle watchdog must be able to tear down a
 		// stalled summarization request without aborting the caller's own signal.
@@ -750,13 +764,15 @@ export async function completeSummarization(
 			const responseStream = Promise.resolve(
 				streamFn ? streamFn(model, context, requestOptions) : streamSimple(model, context, requestOptions),
 			);
-			await consumeStreamWithIdleTimeout(responseStream, {
+			// Settlement rides inside the watchdog: a provider whose iterator ends
+			// without a terminal event used to park here with every timer cleared.
+			return await consumeStreamWithIdleTimeout(responseStream, {
 				idleTimeoutMs: DEFAULT_SUMMARIZATION_IDLE_TIMEOUT_MS,
-				maxDurationMs: DEFAULT_SUMMARIZATION_MAX_DURATION_MS,
+				maxDurationMs,
 				abort: () => requestController.abort(),
 				signal: callerSignal,
+				settle: async () => await (await responseStream).result(),
 			});
-			return await (await responseStream).result();
 		} finally {
 			if (callerSignal) callerSignal.removeEventListener("abort", onCallerAbort);
 		}
@@ -827,6 +843,7 @@ export async function generateSummary(
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
 	cacheFriendly?: Pick<CacheFriendlySummaryOptions, "sourceContext" | "requestOptions">,
+	summarizationMaxDurationMs?: number,
 ): Promise<string> {
 	return (
 		await generateSummaryWithUsage(
@@ -847,6 +864,7 @@ export async function generateSummary(
 			callbacks,
 			sessionId,
 			cacheFriendly,
+			summarizationMaxDurationMs,
 		)
 	).text;
 }
@@ -906,6 +924,7 @@ export async function generateSummaryWithUsage(
 	callbacks?: RetryCallbacks,
 	sessionId?: string,
 	cacheFriendly?: Pick<CacheFriendlySummaryOptions, "sourceContext" | "requestOptions">,
+	summarizationMaxDurationMs?: number,
 ): Promise<{ text: string; usage: Usage }> {
 	const maxTokens = Math.min(
 		Math.floor(0.8 * reserveTokens),
@@ -967,6 +986,7 @@ export async function generateSummaryWithUsage(
 		streamFn,
 		retry,
 		callbacks,
+		summarizationMaxDurationMs,
 	);
 
 	const failure = getSummarizationFailure(response, "Summarization");

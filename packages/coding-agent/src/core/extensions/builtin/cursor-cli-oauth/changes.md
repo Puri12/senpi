@@ -1,5 +1,66 @@
 # cursor-cli-oauth extension changes
 
+## 2026-09-15 - Startup `cursor-agent models` probe: lane-gated, account HOME, explicit env (senpi#1722)
+
+### What changed
+
+- New `packages/coding-agent/src/core/extensions/builtin/cursor-cli-oauth/environment.ts`: `cursorAgentEnvironment(home)` is the single child environment for every cursor-agent spawn - `HOME` = the given account HOME, `AGENT_CLI_CREDENTIAL_STORE=file`, plus `PATH`/`TERM`/`LANG`/`LC_ALL`/`FORCE_COLOR` passthrough (`CURSOR_AGENT_ENVIRONMENT_PASSTHROUGH`). `transport.ts` uses it instead of its private copy; behaviour there is byte-identical.
+- New `packages/coding-agent/src/core/extensions/builtin/cursor-cli-oauth/models-probe.ts`: `runModelsProbe({ executable, stdoutPath, timeoutMs, home })` moved out of `models.ts` and now spawns with `cursorAgentEnvironment(home)` instead of the inherited `process.env`; typed `CursorCliModelProbeTimeoutError` / `CursorCliModelProbeExitError` replace the bare `Error` strings.
+- `packages/coding-agent/src/core/extensions/builtin/cursor-cli-oauth/models.ts`: `resolveCursorCliModelCatalog` no longer owns a default probe; `deps.runProbe` is required because only the caller knows which HOME (and therefore which account) the listing must come from. Cache-first behaviour, TTL, parsing, and the static fallback are unchanged.
+- New `packages/coding-agent/src/core/extensions/builtin/cursor-cli-oauth/catalog-refresh.ts`: `refreshCursorCliModelCatalogForLane` runs the startup refresh through `assessConfiguration` (now exported from `oauth-login.ts` together with its `ConfigurationOutcome` union) and resolves `undefined` without spawning for `disabled`, `not-installed`, and `no-accounts`; for `configured` it probes inside `runInCursorAccountHome` for the pinned account (else the first usable one), so `cursor-agent models` lists the models of the account senpi will actually use.
+- `packages/coding-agent/src/core/extensions/builtin/cursor-cli-oauth/index.ts`: the unconditional `resolveCursorCliModelCatalog` call is replaced by the lane-gated refresh; the static catalog still registers first and is only swapped when a probed catalog arrives. New injectable `runModelsProbe` seam in `CursorCliOauthExtensionDeps`.
+- `packages/coding-agent/src/core/extensions/builtin/cursor-cli-oauth/executable.ts`: `probeCursorAgentVersion` passes `cursorAgentEnvironment(homedir())` (`VersionProbeOptions.env`) instead of inheriting the parent environment.
+
+### Why
+
+- Every senpi process start spawned `cursor-agent models` whenever the catalog cache was missing or stale - even with the lane disabled or no account bound, which the turn path and `check` refuse - and did so with the full inherited environment. cursor-agent runs a macOS keychain preflight (`security add-generic-password -a cursor-keychain-probe ...`) whenever it sees an SSH/mosh marker (`SSH_CLIENT`, `SSH_CONNECTION`, `SSH_TTY`, `MOSH_*`, `VSCODE_SSH_*`), and when the child's `HOME` has no login keychain that call blocks on a GUI "Keychain Not Found" dialog on the logged-in console. SSH-launched hermetic senpi processes (the test suite's RPC/e2e fixtures, sandboxes) reproduced it on every start and leaked one `senpi-cursor-models-*` temp dir per killed probe.
+- The transport already had the right allowlist; the probe paths simply did not share it. One module now owns the contract.
+
+### Why an extension could not handle it
+
+- The spawn sites, the registration-time refresh, and the executable/version probes are this builtin extension's private process boundary; nothing outside it can narrow the child environment or gate the startup spawn.
+
+### Expected merge conflict zones
+
+- LOW: fork-new directory. `index.ts` registration tail, `models.ts` deps/type block, `transport.ts` env helper removal, `executable.ts` version probe, and the two `export` keywords in `oauth-login.ts` conflict only with concurrent hardening of this lane.
+
+## 2026-09-10 - `/cursor-account` renders the display names the generic rename can write (senpi#1495)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/cursor-cli-oauth/accounts.ts`: `CursorCliAccountSlot` carries optional `displayName`; immutable `name` stays the operational identity and the sentinel invariant is unchanged.
+- `packages/coding-agent/src/core/extensions/builtin/cursor-cli-oauth/account-command.ts`: the listing, the "Pinned account" line and the "Affinity pick" line render `accountLabel(...)` (`displayName (name)`) instead of the bare ID, matching the Claude lane. Pinning, removal, import, affinity and status output still address accounts by ID only.
+
+### Why
+
+- `/account <provider> rename ...` accepts any provider, so a cursor account can already hold a label; without these two paths the label was write-only for this lane — visible in `/account cursor-cli-oauth list` and nowhere in `/cursor-account`.
+
+### Why an extension could not handle it
+
+- Both paths are this provider extension's own slot type and command surface; the shared locked rename lives in core below them.
+
+### Expected merge conflict zones
+
+- LOW: slot shape in `accounts.ts`; the three rendering sites in `showAccounts` in `account-command.ts`.
+
+## 2026-09-11 - Detect same-tick settings rewrites
+
+### What changed
+
+- `settings.ts`: the cached provider-settings loader now keys its manager cache on a SHA-256 content revision rather than `mtimeMs:size`, so a rewrite made within one filesystem mtime tick is observed.
+
+### Why
+
+- Linux filesystems can preserve the same mtime for two rapid writes, leaving the loader with stale provider settings despite its re-read contract.
+
+### Why an extension could not handle it
+
+- The cache and its invalidation key are owned by this provider extension's settings loader.
+
+### Expected merge conflict zones
+
+- LOW: `settings.ts` around `settingsFingerprint`.
+
 ## 2026-08-24 - Keep provider tool protocol out of assistant text
 
 ### What changed

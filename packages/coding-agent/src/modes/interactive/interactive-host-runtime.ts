@@ -1,16 +1,32 @@
 import { randomUUID } from "node:crypto";
 import { rm } from "node:fs/promises";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
-import type { AgentSession, AgentSessionEvent, AgentSessionEventListener } from "../../core/agent-session.ts";
+import type {
+	AgentSession,
+	AgentSessionEvent,
+	AgentSessionEventListener,
+	AssistantEditResult,
+	UserEditResult,
+} from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
 import { executeBashWithOperations } from "../../core/bash-executor.ts";
+import { SessionStreamingError } from "../../core/edited-assistant-message.ts";
+import { UserEditError } from "../../core/edited-user-message.ts";
 import type { ProjectTrustContext, ReplacedSessionContext } from "../../core/extensions/index.ts";
 import { SessionManager } from "../../core/session-manager.ts";
 import { SettingsManager } from "../../core/settings-manager.ts";
 import type { BashOperations } from "../../core/tools/bash.ts";
+import { QUESTION_CAPABILITY, RENDERED_COMPONENTS_CAPABILITY } from "../rpc/custom-capability.ts";
 import { type EnsuredHost, ensureHost } from "../rpc/host-ensure.ts";
-import { isTransportGoneError, RpcClient, type RpcClientEvent } from "../rpc/rpc-client.ts";
+import { isTransportGoneError, RpcClient, type RpcClientEvent, RpcCommandError } from "../rpc/rpc-client.ts";
+
+/**
+ * What this TUI can render for a host: host-side components and the rich
+ * multi-question overlay. Without `question` the host degrades every
+ * `ctx.ui.question` call into sequential select/input prompts.
+ */
+const HOST_CLIENT_CAPABILITIES: readonly string[] = [RENDERED_COMPONENTS_CAPABILITY, QUESTION_CAPABILITY];
 
 export const INTERACTIVE_HOST_FALLBACK_WARNING = "Warning: shared interactive host unavailable; continuing locally";
 export const INTERACTIVE_HOST_RECONNECTING_WARNING = "Warning: shared interactive host connection lost; reconnecting";
@@ -139,7 +155,7 @@ export async function createInteractiveHostRuntime(
 	try {
 		await startHost({ socket: options.socket, agentDir: options.agentDir });
 		await client.start();
-		await client.setClientInfo(80, ["rendered_components"]);
+		await client.setClientInfo(80, [...HOST_CLIENT_CAPABILITIES]);
 		const startupEvents: import("../rpc/rpc-client.ts").RpcClientEvent[] = [];
 		const stopBuffering = client.onEvent((event) => startupEvents.push(event));
 		const opened = await client.openSession({
@@ -290,16 +306,24 @@ export class RemoteInteractiveRuntime {
 	setHostUiHandler(callback?: InteractiveHostUiHandler): void {
 		this.#remoteSession.setHostUiHandler(callback);
 	}
+	/**
+	 * Forward a debounced draft of an open host `question` request. Best-effort:
+	 * the host keeps its own timer, so a lost frame only delays the deadline
+	 * refresh, and a gone transport is already reported by the event stream.
+	 */
+	sendHostUiProgress(record: import("../rpc/rpc-types.ts").RpcExtensionUIProgress): void {
+		void this.#client.sendExtensionUIProgress(record).catch(() => {});
+	}
 	#clientInfoSent = false;
 	#lastClientWidth = 80;
 	setClientInfo(width: number): void {
 		this.#lastClientWidth = width;
-		const capabilities = this.#clientInfoSent ? undefined : ["rendered_components"];
+		const capabilities = this.#clientInfoSent ? undefined : [...HOST_CLIENT_CAPABILITIES];
 		this.#clientInfoSent = true;
 		void this.#client.setClientInfo(width, capabilities).catch(() => {});
 	}
 	async reRegisterClientInfo(): Promise<void> {
-		await this.#client.setClientInfo(this.#lastClientWidth, ["rendered_components"]);
+		await this.#client.setClientInfo(this.#lastClientWidth, [...HOST_CLIENT_CAPABILITIES]);
 	}
 	async dispose(): Promise<void> {
 		if (this.#state === "disposed") return;
@@ -993,11 +1017,65 @@ export function createRemoteSessionProxy(
 				return (name: string) => client.setSessionName(name).catch(reportActionFailure("setSessionName"));
 			if (property === "navigateTree")
 				return async (targetId: string, options?: Parameters<AgentSession["navigateTree"]>[1]) => {
-					const result = await transportCall("navigateTree", () => client.navigateTree(targetId, options), {
-						cancelled: true,
-					});
+					const result = await transportCall<Omit<Awaited<ReturnType<RpcClient["navigateTree"]>>, "leafId">>(
+						"navigateTree",
+						() => client.navigateTree(targetId, options),
+						{ cancelled: true },
+					);
 					if (!result.cancelled) await refresh();
 					return result;
+				};
+			if (property === "editAssistantMessage")
+				return async (
+					entryId: string,
+					text: string,
+					options?: Parameters<AgentSession["editAssistantMessage"]>[2],
+				): Promise<AssistantEditResult> => {
+					const result = await client.editAssistantMessage(entryId, text, {
+						expectedLeafId: options?.expectedLeafId,
+						summarize: options?.summarize,
+						customInstructions: options?.customInstructions,
+					});
+					if (result.outcome === "unchanged") return { cancelled: false, unchanged: true };
+					if (result.outcome === "cancelled") return { cancelled: true, aborted: result.aborted };
+					await refresh();
+					return { cancelled: false, entryId: result.entry.id };
+				};
+			if (property === "editUserMessage")
+				return async (
+					entryId: string,
+					text: string,
+					options?: Parameters<AgentSession["editUserMessage"]>[2],
+				): Promise<UserEditResult> => {
+					let result: Awaited<ReturnType<RpcClient["editUserMessage"]>>;
+					try {
+						result = await client.editUserMessage(entryId, text, {
+							expectedLeafId: options?.expectedLeafId,
+							summarize: options?.summarize,
+							customInstructions: options?.customInstructions,
+						});
+					} catch (error) {
+						// The proxy implements AgentSession, so restore its typed rejections across the wire.
+						if (error instanceof RpcCommandError) {
+							switch (error.errorCode) {
+								case "streaming":
+									throw new SessionStreamingError();
+								case "not_found":
+									throw new UserEditError("not-found", error.message);
+								case "not_user":
+									throw new UserEditError("not-user", error.message);
+								case "empty":
+									throw new UserEditError("empty", error.message);
+								case "stale_leaf":
+									throw new UserEditError("stale-leaf", error.message);
+							}
+						}
+						throw error;
+					}
+					if (result.outcome === "unchanged") return { cancelled: false, unchanged: true };
+					if (result.outcome === "cancelled") return { cancelled: true, aborted: result.aborted };
+					await refresh();
+					return { cancelled: false, entryId: result.entry.id };
 				};
 			if (property === "getUserMessagesForForking")
 				return () => transportCall("getUserMessagesForForking", () => client.getForkMessages(), []);

@@ -30,6 +30,8 @@ import {
 	pinCredentialAccount,
 	removeCredentialAccount,
 } from "../../core/credential-accounts.ts";
+import { AssistantEditError, SessionStreamingError } from "../../core/edited-assistant-message.ts";
+import { UserEditError } from "../../core/edited-user-message.ts";
 import {
 	emitProviderAccountsChanged,
 	subscribeProviderAccountEvents,
@@ -57,16 +59,19 @@ import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import { getSupportedThinkingLevels } from "../../core/thinking-levels.ts";
 import { ProjectTrustStore } from "../../core/trust-manager.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
+import { ConnectionQuestionBridge, degradeQuestion, sessionQuestionBridges } from "./connection-question-bridge.ts";
 import {
 	AUTO_TITLE_SESSIONS_CAPABILITY,
 	buildCustomUnsupportedRequest,
 	DEFAULT_CUSTOM_EXTENSION_LABEL,
 	EXTENSION_EVENTS_CAPABILITY,
 	MEDIA_PLACEHOLDERS_CAPABILITY,
+	QUESTION_CAPABILITY,
 	RENDERED_COMPONENTS_CAPABILITY,
 } from "./custom-capability.ts";
 import { createRpcEventOutputBuffer } from "./event-output-buffer.ts";
 import { createRpcLoginPromptCallbacks } from "./login-prompts.ts";
+import { protocolIdentity } from "./protocol-identity.ts";
 import { buildRpcCommandsForSession, createCommandsChangedEvent, rpcCommandListDigest } from "./rpc-command-surface.ts";
 import { rpcCommandPayloadError, rpcCommandShapeError, rpcMessageLengthError } from "./rpc-input-validation.ts";
 import type {
@@ -74,6 +79,7 @@ import type {
 	RpcCommand,
 	RpcCommandInvocationEvent,
 	RpcExtensionEvent,
+	RpcExtensionUIProgress,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcLoadedExtension,
@@ -97,6 +103,8 @@ export interface RpcConnectionOptions {
 	shutdownHandler?: () => void;
 	/** Session registries own runtime disposal themselves. */
 	disposeRuntime?: boolean;
+	/** Shared workers flush synchronously into their bounded IPC credit channel. */
+	eventFlushScheduler?: (flush: () => void) => void;
 	/** Multi-session routing handle. Absent preserves classic wire output exactly. */
 	sessionId?: string;
 	footerDataProviderFactory?: (session: AgentSession) => FooterDataProvider;
@@ -193,6 +201,7 @@ export function buildRpcSessionState(session: AgentSession, lastAbortSource?: Ag
 	}
 	const projectTrusted = new ProjectTrustStore(session.agentDir).get(cwd) === true;
 	return {
+		pendingQuestions: sessionQuestionBridges.get(session)?.pendingQuestions(),
 		model: session.model,
 		thinkingLevel: session.thinkingLevel,
 		...(session.thinkingSelection ? { thinkingSelection: session.thinkingSelection } : {}),
@@ -214,7 +223,12 @@ export function buildRpcSessionState(session: AgentSession, lastAbortSource?: Ag
 		!existsSync(session.sessionFile) &&
 		session.sessionManager
 			.getEntries()
-			.some((entry) => entry.type !== "model_change" && entry.type !== "thinking_level_change")
+			.some(
+				(entry) =>
+					entry.type !== "model_change" &&
+					entry.type !== "model_change_rejected" &&
+					entry.type !== "thinking_level_change",
+			)
 			? { entries: session.sessionManager.getEntries() }
 			: {}),
 		steering: typeof session.getSteeringMessages === "function" ? [...session.getSteeringMessages()] : [],
@@ -347,7 +361,7 @@ export function createRpcConnectionHandler(
 	let loadedSurfacesDigest: string | undefined;
 	let rpcCommandsDigest: string | undefined;
 	let suppressLoadedSurfaceEvents = false;
-	const eventOutput = createRpcEventOutputBuffer(sink.writeRaw);
+	const eventOutput = createRpcEventOutputBuffer(sink.writeRaw, options.eventFlushScheduler);
 
 	const tagSessionRecord = <T extends object>(value: T): T | (T & { sessionId: string }) =>
 		routingSessionId === undefined ? value : { ...value, sessionId: routingSessionId };
@@ -439,6 +453,10 @@ export function createRpcConnectionHandler(
 		errorCode?: string,
 		errorData?: unknown,
 	): RpcResponse => {
+		const details =
+			errorData === undefined && (command === "edit_user_message" || command === "navigate_tree")
+				? { leafId: session.sessionManager.getLeafId() }
+				: errorData;
 		return {
 			id,
 			type: "response",
@@ -446,12 +464,13 @@ export function createRpcConnectionHandler(
 			success: false,
 			error: message,
 			...(errorCode ? { errorCode } : {}),
-			...(errorData === undefined ? {} : { errorData }),
+			...(details === undefined ? {} : { errorData: details }),
 		};
 	};
 
 	// Pending extension UI requests waiting for response
 	const pendingExtensionRequests = new SessionExtensionUiRequests();
+	const questions = new ConnectionQuestionBridge(output);
 
 	let shutdownRequested = false;
 
@@ -508,6 +527,10 @@ export function createRpcConnectionHandler(
 	 * Create an extension UI context that uses the RPC protocol.
 	 */
 	const createExtensionUIContext = (): ExtensionUIContext => ({
+		question: (request, opts) =>
+			clientCapabilities?.includes(QUESTION_CAPABILITY)
+				? questions.ask(request, opts)
+				: degradeQuestion(createExtensionUIContext(), request, opts),
 		select: (title, options, opts) =>
 			createDialogPromise(opts, undefined, { method: "select", title, options, timeout: opts?.timeout }, (r) =>
 				"cancelled" in r && r.cancelled ? undefined : "value" in r ? r.value : undefined,
@@ -823,6 +846,7 @@ export function createRpcConnectionHandler(
 		unsubscribeExtensionEvents?.();
 		const replacedSession = session !== runtimeHost.session;
 		session = runtimeHost.session;
+		sessionQuestionBridges.set(session, questions);
 		if (replacedSession) {
 			lastAbortSource = undefined;
 			if (routingSessionId !== undefined || !replacementIssuedHere) {
@@ -874,8 +898,25 @@ export function createRpcConnectionHandler(
 								customInstructions: options?.customInstructions,
 								replaceInstructions: options?.replaceInstructions,
 								label: options?.label,
+								expectedLeafId: options?.expectedLeafId,
 							});
 							return { cancelled: result.cancelled };
+						},
+						editAssistantMessage: async (entryId, text, options) => {
+							const result = await session.editAssistantMessage(entryId, text, {
+								summarize: options?.summarize,
+								customInstructions: options?.customInstructions,
+								expectedLeafId: options?.expectedLeafId,
+							});
+							return { cancelled: result.cancelled, unchanged: result.unchanged, entryId: result.entryId };
+						},
+						editUserMessage: async (entryId, text, options) => {
+							const result = await session.editUserMessage(entryId, text, {
+								summarize: options?.summarize,
+								customInstructions: options?.customInstructions,
+								expectedLeafId: options?.expectedLeafId,
+							});
+							return { cancelled: result.cancelled, unchanged: result.unchanged, entryId: result.entryId };
 						},
 						switchSession: async (sessionPath, options) => {
 							return runtimeHost.switchSession(sessionPath, options);
@@ -1044,6 +1085,7 @@ export function createRpcConnectionHandler(
 							]),
 						],
 						mode: "classic",
+						...protocolIdentity(),
 					},
 				};
 			case "open_session":
@@ -1123,12 +1165,18 @@ export function createRpcConnectionHandler(
 			}
 
 			case "steer": {
-				await session.steer(command.message, command.images, { enqueueOrder: command.enqueueOrder });
+				await session.steer(command.message, command.images, {
+					enqueueOrder: command.enqueueOrder,
+					source: "rpc",
+				});
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images, { enqueueOrder: command.enqueueOrder });
+				await session.followUp(command.message, command.images, {
+					enqueueOrder: command.enqueueOrder,
+					source: "rpc",
+				});
 				return success(id, "follow_up");
 			}
 
@@ -1360,13 +1408,56 @@ export function createRpcConnectionHandler(
 			// =================================================================
 
 			case "navigate_tree": {
-				const result = await session.navigateTree(command.targetId, {
-					summarize: command.summarize,
-					customInstructions: command.customInstructions,
-					replaceInstructions: command.replaceInstructions,
-					label: command.label,
-				});
-				return success(id, "navigate_tree", result);
+				// Addressing refusals. The command type forbids both spellings at once and neither of
+				// them, so TypeScript narrows these branches to `never` - they exist for the inbound
+				// JSON no type can police, which is why the command name is written out here.
+				if (command.entryId !== undefined && command.targetId !== undefined) {
+					return error(id, "navigate_tree", "navigate_tree takes either entryId or targetId, not both");
+				}
+				if (command.entryId === undefined && command.targetId === undefined) {
+					return error(id, "navigate_tree", "navigate_tree requires entryId or targetId");
+				}
+				const targetId = command.entryId ?? command.targetId;
+				if (typeof targetId !== "string" || targetId.length === 0) {
+					return error(id, command.type, "navigate_tree requires a non-empty entryId or targetId");
+				}
+				if (command.intent !== undefined && command.intent !== "select" && command.intent !== "resume") {
+					return error(id, command.type, "navigate_tree intent must be select or resume");
+				}
+				try {
+					// Core owns selection/resumption, summaries, cancellation, and root reset.
+					// Pass the requested entry itself, not a client- or handler-computed parent.
+					const result = await session.navigateTree(targetId, {
+						...(command.intent !== undefined ? { intent: command.intent } : {}),
+						summarize: command.summarize,
+						customInstructions: command.customInstructions,
+						replaceInstructions: command.replaceInstructions,
+						label: command.label,
+						expectedLeafId: command.expectedLeafId,
+					});
+					const leafId = session.sessionManager.getLeafId();
+					if (command.targetId !== undefined) {
+						return success(id, command.type, { ...result, leafId });
+					}
+					if (result.cancelled) {
+						return success(id, command.type, {
+							outcome: "cancelled",
+							leafId,
+							...(result.aborted ? { aborted: true } : {}),
+						});
+					}
+					return success(id, command.type, {
+						outcome: "navigated",
+						leafId,
+						...(result.editorText !== undefined ? { editorText: result.editorText } : {}),
+						...(result.summaryEntry ? { summaryEntryId: result.summaryEntry.id } : {}),
+					});
+				} catch (err) {
+					if (err instanceof AssistantEditError || err instanceof SessionStreamingError) {
+						return error(id, command.type, err.message, err.code);
+					}
+					throw err;
+				}
 			}
 
 			case "record_bash_result":
@@ -1446,6 +1537,96 @@ export function createRpcConnectionHandler(
 				if (routingSessionId === undefined && !result.cancelled && session !== runtimeHost.session)
 					await rebindAfterLocalReplacement();
 				return success(id, "fork", { text: result.selectedText, cancelled: result.cancelled });
+			}
+
+			case "edit_assistant_message": {
+				if (
+					typeof command.entryId !== "string" ||
+					command.entryId.length === 0 ||
+					typeof command.text !== "string"
+				) {
+					return error(id, command.type, "edit_assistant_message requires a non-empty entryId and a text string");
+				}
+				try {
+					const result = await session.editAssistantMessage(command.entryId, command.text, {
+						summarize: command.summarize,
+						customInstructions: command.customInstructions,
+						expectedLeafId: command.expectedLeafId,
+					});
+					const leafId = session.sessionManager.getLeafId();
+					if (result.unchanged) {
+						return success(id, command.type, { outcome: "unchanged", leafId });
+					}
+					if (result.cancelled) {
+						return success(id, command.type, {
+							outcome: "cancelled",
+							leafId,
+							...(result.aborted ? { aborted: true } : {}),
+						});
+					}
+					const entry = result.entryId ? session.sessionManager.getEntry(result.entryId) : undefined;
+					if (entry?.type !== "message" || leafId === null) {
+						return error(id, command.type, "Edited assistant entry was not persisted");
+					}
+					return success(id, command.type, {
+						outcome: "edited",
+						entry,
+						leafId,
+						...(result.summaryEntry ? { summaryEntryId: result.summaryEntry.id } : {}),
+					});
+				} catch (err) {
+					if (err instanceof AssistantEditError || err instanceof SessionStreamingError) {
+						return error(id, command.type, err.message, err.code);
+					}
+					throw err;
+				}
+			}
+
+			case "edit_user_message": {
+				if (
+					typeof command.entryId !== "string" ||
+					command.entryId.length === 0 ||
+					typeof command.text !== "string"
+				) {
+					return error(id, command.type, "edit_user_message requires a non-empty entryId and a text string");
+				}
+				try {
+					const result = await session.editUserMessage(command.entryId, command.text, {
+						summarize: command.summarize,
+						customInstructions: command.customInstructions,
+						expectedLeafId: command.expectedLeafId,
+					});
+					const leafId = session.sessionManager.getLeafId();
+					if (result.unchanged) {
+						return success(id, command.type, { outcome: "unchanged", leafId });
+					}
+					if (result.cancelled) {
+						return success(id, command.type, {
+							outcome: "cancelled",
+							leafId,
+							...(result.aborted ? { aborted: true } : {}),
+						});
+					}
+					const entry = result.entryId ? session.sessionManager.getEntry(result.entryId) : undefined;
+					if (entry?.type !== "message" || leafId === null) {
+						return error(id, command.type, "Edited user entry was not persisted");
+					}
+					return success(id, command.type, {
+						outcome: "edited",
+						entry,
+						leafId,
+						...(result.summaryEntry ? { summaryEntryId: result.summaryEntry.id } : {}),
+					});
+				} catch (err) {
+					if (
+						err instanceof UserEditError ||
+						err instanceof AssistantEditError ||
+						err instanceof SessionStreamingError
+					) {
+						return error(id, command.type, err.message, err.code);
+					}
+					throw err;
+				}
 			}
 
 			case "clone": {
@@ -1636,6 +1817,16 @@ export function createRpcConnectionHandler(
 			return;
 		}
 
+		if (
+			typeof parsed === "object" &&
+			parsed !== null &&
+			"type" in parsed &&
+			parsed.type === "extension_ui_progress"
+		) {
+			questions.progress(parsed as RpcExtensionUIProgress);
+			return;
+		}
+
 		// Handle extension UI responses
 		if (
 			typeof parsed === "object" &&
@@ -1644,6 +1835,9 @@ export function createRpcConnectionHandler(
 			parsed.type === "extension_ui_response"
 		) {
 			const response = parsed as RpcExtensionUIResponse;
+			const result = questions.respond(response);
+			if (typeof result === "string") output(error(response.id, "extension_ui_response", result));
+			if (result) return;
 			if (!pendingExtensionRequests.resolve(response) && routingSessionId !== undefined) {
 				// This binding owns exactly one session's request map. A response not
 				// requested here is a routed protocol error, never a cross-session match.
@@ -1684,6 +1878,7 @@ export function createRpcConnectionHandler(
 
 	const dispose = async (): Promise<void> => {
 		disposeAllRenderers();
+		questions.cancelAll();
 		pendingExtensionRequests.close();
 		unsubscribeProviderAccountEvents();
 		unsubscribe?.();
@@ -1721,6 +1916,7 @@ export function createRpcConnectionHandler(
 			return shutdownRequested;
 		},
 		cancelPendingExtensionUiRequests() {
+			questions.cancelAll();
 			pendingExtensionRequests.cancelAll();
 		},
 		async dispose() {

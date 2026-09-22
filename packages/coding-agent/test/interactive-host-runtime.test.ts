@@ -158,14 +158,15 @@ async function waitForHost(child: ChildProcessWithoutNullStreams, socket: string
 }
 
 describe("interactive host runtime", () => {
-	it("re-registers rendered capability and last width after reconnect", async () => {
+	it("re-registers rendered and question capabilities plus the last width after reconnect", async () => {
 		const setClientInfo = vi.fn(async () => {});
 		const runtime = new RemoteInteractiveRuntime({} as AgentSessionRuntime, {} as never, { setClientInfo } as never);
 		runtime.setClientInfo(117);
 		await Promise.resolve();
 		await runtime.reRegisterClientInfo();
-		expect(setClientInfo).toHaveBeenNthCalledWith(1, 117, ["rendered_components"]);
-		expect(setClientInfo).toHaveBeenNthCalledWith(2, 117, ["rendered_components"]);
+		// Without "question" a host-attached TUI degrades to sequential select/input prompts.
+		expect(setClientInfo).toHaveBeenNthCalledWith(1, 117, ["rendered_components", "question"]);
+		expect(setClientInfo).toHaveBeenNthCalledWith(2, 117, ["rendered_components", "question"]);
 	});
 	it("replays only own-session and untagged startup events", async () => {
 		const cwd = tmpdir();
@@ -525,7 +526,23 @@ describe("interactive host runtime", () => {
 			expect(runtime.session.isFastModeActive()).toBe(false);
 			expect(runtime.session.serviceTier).toBeUndefined();
 
+			// The host acknowledges setFastMode before the service_tier_changed wire
+			// event reaches the attached session, so subscribe first and wait for the
+			// mirrored state instead of asserting on the RPC reply alone.
+			const tierChanged = new Promise<void>((resolve, reject) => {
+				const timer = setTimeout(() => {
+					unsubscribe();
+					reject(new Error("timed out waiting for service_tier_changed with fastMode=true"));
+				}, 10_000);
+				const unsubscribe = runtime.session.subscribe((event) => {
+					if (event.type !== "service_tier_changed" || !event.fastMode) return;
+					clearTimeout(timer);
+					unsubscribe();
+					resolve();
+				});
+			});
 			await observer.setFastMode(true);
+			await tierChanged;
 
 			expect(runtime.session.isFastModeActive()).toBe(true);
 			expect(runtime.session.serviceTier).toBe("priority");
@@ -1225,6 +1242,66 @@ describe("interactive host runtime", () => {
 			expect(runtime.session.sessionFile).not.toBe(firstFile);
 			expect(runtime.session.sessionId).not.toBe(firstId);
 			expect(runtime.session.sessionManager.getSessionFile()).toBe(runtime.session.sessionFile);
+		} finally {
+			await runtime.dispose();
+			await fake.close();
+		}
+	});
+
+	it("routes assistant edits to the host with the caller's leaf token and refreshes proxy history", async () => {
+		const qa = scratch("edit");
+		const fake = await startFakeModelServer();
+		writeRpcModelsJson(qa.agentDir, fake.origin);
+		const host = spawnHost(qa);
+		await waitForHost(host, qa.socket);
+		const manager = SessionManager.create(qa.cwd, qa.sessionDir);
+		manager.appendMessage({ role: "user", content: "edit-user", timestamp: 1 });
+		manager.appendMessage(fauxAssistantMessage("edit-assistant"));
+		const assistantId = manager.getLeafId()!;
+		const local = await createAgentSessionRuntimeFixture({
+			cwd: qa.cwd,
+			agentDir: qa.agentDir,
+			sessionManager: manager,
+			settingsManager: SettingsManager.create(qa.cwd, qa.agentDir),
+		});
+		const runtime = await createInteractiveHostRuntime(local, {
+			socket: qa.socket,
+			ensureHost: async () => undefined,
+		});
+		try {
+			// The host appends its own bookkeeping entries on attach, so the only honest
+			// leaf token is the one read from the host itself (the plan's token discipline).
+			const hostLeaf = runtime.session.sessionManager.getLeafId();
+			expect(hostLeaf).toBeTruthy();
+			const result = await runtime.session.editAssistantMessage(assistantId, "edited on host", {
+				summarize: false,
+				expectedLeafId: hostLeaf ?? undefined,
+			});
+			expect(result.cancelled).toBe(false);
+			expect(result.entryId).toBeDefined();
+			expect(result.entryId).not.toBe(assistantId);
+			const texts = runtime.session.messages
+				.filter((m) => m.role === "assistant")
+				.map((m) => ("content" in m && Array.isArray(m.content) ? m.content : []))
+				.map((blocks) =>
+					blocks
+						.filter((b): b is { type: "text"; text: string } => b.type === "text")
+						.map((b) => b.text)
+						.join(""),
+				);
+			expect(texts).toEqual(["edited on host"]);
+
+			const stale = await runtime.session
+				.editAssistantMessage(assistantId, "second window", {
+					summarize: false,
+					expectedLeafId: hostLeaf ?? undefined,
+				})
+				.then(
+					() => undefined,
+					(error: unknown) => error,
+				);
+			expect(stale).toBeInstanceOf(Error);
+			expect((stale as { errorCode?: string }).errorCode).toBe("stale_leaf");
 		} finally {
 			await runtime.dispose();
 			await fake.close();

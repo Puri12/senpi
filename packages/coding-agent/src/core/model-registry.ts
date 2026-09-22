@@ -2,12 +2,14 @@ import { join } from "node:path";
 import type {
 	Api,
 	AssistantMessage,
+	AssistantMessageEventStream,
 	AuthResult,
 	Context,
 	Model,
 	ModelsApiStreamOptions,
 	ModelsRefreshOptions,
 	ModelsRefreshResult,
+	ModelsSimpleStreamOptions,
 	Provider,
 	ProviderHeaders,
 } from "@earendil-works/pi-ai";
@@ -109,12 +111,13 @@ export class ModelRegistry {
 	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
 		try {
 			const resolution = await this.runtime.getAuth(model);
-			const compatibility = this.runtime.getCompatibilityRequestConfig(model, resolution?.env);
+			const compatibility = this.runtime.getCompatibilityRequestConfig(model);
 			if (!resolution) {
 				if (compatibility.authHeader) {
 					return { ok: false, error: `No API key found for "${model.provider}"` };
 				}
-				return { ok: true, headers: compatibility.headers, extraBody: compatibility.extraBody };
+				const headers = await this.runtime.getCompatibilityRequestHeaders(model);
+				return { ok: true, headers, extraBody: compatibility.extraBody };
 			}
 			return {
 				ok: true,
@@ -146,6 +149,20 @@ export class ModelRegistry {
 
 	getProvider(provider: string): Provider | undefined {
 		return this.runtime.getProvider(provider);
+	}
+
+	/** Stream through the configured provider with request-time authentication. */
+	stream<TApi extends Api>(
+		model: Model<TApi>,
+		context: Context,
+		options?: ModelsApiStreamOptions<TApi>,
+	): AssistantMessageEventStream {
+		return this.runtime.stream(model, context, options);
+	}
+
+	/** Stream with provider-neutral options and request-time authentication. */
+	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
+		return this.runtime.streamSimple(model, context, options);
 	}
 
 	complete<TApi extends Api>(

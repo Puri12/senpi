@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { GOAL_MONITOR_BACKSTOP_DEFAULT_DELAY_MS } from "../../../src/core/extensions/builtin/goal/monitor-continuation.ts";
 import { readGoal, updateGoal } from "../../../src/core/extensions/builtin/goal/store.ts";
 import type { ExtensionContext } from "../../../src/core/extensions/types.ts";
 import {
@@ -166,7 +167,7 @@ describe("issue #1139: unattended continuation backstop", () => {
 		await harness.events.flush();
 		await runContinuationTurn(harness, ctx, cleanAssistantStopWithText("waiting on the monitor"));
 		const delayedDeliveryRecorded = waitForSentCount(harness, 2);
-		await vi.advanceTimersByTimeAsync(240_000);
+		await vi.advanceTimersByTimeAsync(GOAL_MONITOR_BACKSTOP_DEFAULT_DELAY_MS);
 		await delayedDeliveryRecorded;
 
 		expect(harness.sent).toHaveLength(2);

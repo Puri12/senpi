@@ -49,6 +49,7 @@ function input(overrides: Partial<ContinuityDecisionInput> = {}): ContinuityDeci
 		modelId: "claude-opus-4-5",
 		fingerprint: FINGERPRINT,
 		transcriptAvailable: true,
+		crossAccountResumeSupported: true,
 		...overrides,
 	};
 }
@@ -89,7 +90,7 @@ describe("claude-sdk-oauth native continuity decisions", () => {
 			input({ fingerprint: { systemPromptHash: "prompt-v2", toolsetHash: FINGERPRINT.toolsetHash } }),
 		);
 
-		expect(decision).toMatchObject({ kind: "reattach", reason: "options_changed", sdkSessionId: "sdk-1" });
+		expect(decision).toMatchObject({ kind: "reattach", reason: "system_prompt_changed", sdkSessionId: "sdk-1" });
 	});
 
 	it("reattaches rather than flattens when the model changed", () => {
@@ -151,6 +152,7 @@ describe("claude-sdk-oauth native continuity decisions", () => {
 					toolsetHash: FINGERPRINT.toolsetHash,
 				},
 				transcriptAvailable: false,
+				crossAccountResumeSupported: true,
 			}),
 		);
 
@@ -183,6 +185,7 @@ describe("claude-sdk-oauth native continuity decisions", () => {
 					toolsetHash: FINGERPRINT.toolsetHash,
 				},
 				transcriptAvailable: true,
+				crossAccountResumeSupported: true,
 				currentHashes: ["h1", "h2-rewritten", "h3"],
 			}),
 		);

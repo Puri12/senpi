@@ -1,6 +1,6 @@
 # builtin/prompt-preset
 
-Builtin extension #7. On `before_agent_start` and `model_select`, picks a system prompt preset by **model family** (gpt-5.x through gpt-5.6, gpt-6-astra, claude-fable-5, claude-fable-5-1, claude-opus-5, claude-opus-4-{5,6,7,8}, glm-5.2, glm-5.3, deepseek-v4-{flash,flash-0731,pro}, kimi-k2-{6,7}, kimi-k3) and falls back to the senpi dynamic prompt when nothing matches. Renders the active preset name in the startup header. After 2026-04-30, presets are thin wrappers around `buildDynamicSystemPrompt()` carrying only model-specific tuning.
+Builtin extension #7. On `before_agent_start` and `model_select`, picks a system prompt preset by **model family** (gpt-5.x through gpt-5.6, gpt-6-astra, claude-fable-5, claude-fable-5-1, claude-opus-5, claude-opus-4-{5,6,7,8}, glm-5.2, glm-5.3, deepseek-v4-{flash,flash-0731,pro}, deepseek-v4-1-flash, kimi-k2-{6,7,8}, kimi-k3) and falls back to the senpi dynamic prompt when nothing matches. Renders the active preset name in the startup header. After 2026-04-30, presets are thin wrappers around `buildDynamicSystemPrompt()` carrying only model-specific tuning.
 
 ## FILES
 
@@ -18,7 +18,7 @@ prompt-preset/
 ├── gpt-5.4.ts           # GPT-5.4 preset
 ├── gpt-5.5.ts           # GPT-5.5 preset — full-core rewrite via `corePrompt` (outcome-first, per the GPT-5.5 prompting guide)
 ├── gpt-5.6.ts           # GPT-5.6 series preset (sol/terra/luna) — dieted full-core rewrite via `corePrompt`; Hephaestus-parity autonomous deep worker (implement-don't-propose, Manual QA Gate, binding stop contract: declared per-turn stop condition + Stop Goal) under GPT-5.6 simplify-first doctrine; also owns `GPT56_EXECUTION_RULES` — typed execution-discipline rule data (eval-first code-cell routing, maximum parallel batching, over-call bias, in-kernel reduction, stay-direct exceptions, subagent fan-out, finest-grain todos, test-first, atomic commits, LSP symbol routing) rendered one directive per point of use
-├── gpt-6-astra.ts       # GPT-6 Astra preset — full-core rewrite via `corePrompt` written from scratch against the GPT-6 Astra guide: `## Initiative` (bias to action, approval as the last step on a reviewable result, steering, no unsolicited caution), `## Instructions From Files` (user > skills/project files/memories; name and quote the line that makes you pause), `## Asynchronous Work` (background handles + completion notifications, no wait tool, `monitor` for every observable wait), engineer-prose `## Writing` with the guide's slop-phrase ban; owns `GPT6_ASTRA_RULES` typed rule data rendered once each; only the eval-cell and async rules carry bold/caps emphasis
+├── gpt-6-astra.ts       # GPT-6 Astra preset — full-core rewrite via `corePrompt` written from scratch against the GPT-6 Astra guide: `## Initiative` (bias to action, approval as the last step on a reviewable result, steering without a fresh routing line, no unsolicited caution, memory before asking), `## Instructions From Files` (user > skills/project files/memories; name and quote the line that makes you pause), `## Asynchronous Work` (background handles + completion notifications, no wait tool, `monitor` for every observable wait), `## Working the Task` delegation that keeps the work by default and hands out only sizeable independent tracks, engineer-prose `## Writing` with the guide's slop-phrase ban; owns `GPT6_ASTRA_RULES` typed rule data rendered once each; only the eval-cell and async rules carry bold/caps emphasis
 ├── claude-fable-5.ts    # Claude Fable 5 preset — dieted full-core rewrite via `corePrompt` (Fable 5 prompting guide; binding stop contract)
 ├── claude-fable-5-1.ts  # Claude Fable 5.1 preset — fable-5 core plus surgical deltas per the Fable 5.1 prompting guide (scope-is-deliverable, batching, surgical edits, test scope, formatting/narration recalibration); dotted release resolves before the generic fable-5 substring
 ├── claude-opus-5.ts     # Claude Opus 5 preset — dieted full-core rewrite via `corePrompt` on the fable-5-1 skeleton (one home per rule, Scope section) plus the Opus 5 guide deltas: bounded single-pass verification, delegation caps, narration cadence, correction filter, document length, short conciseness line, outcome-first final summary
@@ -28,8 +28,10 @@ prompt-preset/
 ├── deepseek-v4.ts       # Shared DeepSeek V4 rule data (`DEEPSEEK_V4_RULES`) + tuning builders (directive authority, todo discipline, missing-info, settled-reading, reasoning-aim)
 ├── deepseek-v4-flash.ts # DeepSeek V4 Flash preset (thin tuningSection over the shared core)
 ├── deepseek-v4-flash-0731.ts # DeepSeek V4 Flash 0731 snapshot preset — dated snapshot resolves before the generic flash alias
+├── deepseek-v4-1-flash.ts # DeepSeek V4.1 Flash preset — execution-tooling stance + claude dialect only, none of the V4 rules (new pre-train; DeepSeek's own scaffold table favours the thinnest harness); resolves every V4.1 id shape (deepseek-flash, v4.1/v4p1/v4-1-flash) and the official provider's retired deepseek-v4-flash / -vision-exp aliases, which the DeepSeek API serves with V4.1 since 2026-09-10
 ├── deepseek-v4-pro.ts   # DeepSeek V4 Pro preset (deep-reasoner calibration)
-├── kimi-k2-{6,7}.ts     # Kimi K2.6 / K2.7 presets (kimi-k2-6.ts, kimi-k2-7.ts)
+├── kimi-k2-code.ts      # Shared Kimi K2 coding-family core (`buildKimiK2CodePrompt`): execution-tooling stance in the kimi dialect + the restrained outcome-first tuning, parameterized by model name. K2.7 Code and K2.8 Preview share one prompting surface — Moonshot upgraded Kimi Code's rolling `kimi-for-coding` id to K2.8 in place, same family, same posture
+├── kimi-k2-{6,7,8}.ts   # Kimi K2.6 preset (kimi-k2-6.ts) plus the K2.7 / K2.8 thin aliases over `buildKimiK2CodePrompt` (kimi-k2-7.ts, kimi-k2-8.ts). Kimi Code's rolling ids resolve by exact match: `kimi-for-coding` -> kimi-k2-8, `kimi-for-coding-highspeed` -> kimi-k2-7
 ├── kimi-k3.ts           # Kimi K3 preset — full-core rewrite via `corePrompt` on the Fable 5.1 skeleton, tuned for Moonshot's documented K3 "excessive proactiveness" (Scope section: request = deliverable, pre-existing problems are follow-ups, test scope; reflect-then-ask ambiguity gate; bounded failure cap; delegation with propagated stop condition) + binding stop contract (declared stop condition in the routing line)
 └── changes.md           # Fork tracker (model-family rename 2026-04-30, file-operations 2026-05-07)
 ```
@@ -45,6 +47,7 @@ prompt-preset/
 | Tune the eval-default stance for Claude, GLM, and Kimi presets | `execution-tooling.ts` + `test/suite/prompt-presets-execution-tooling.test.ts` |
 | Tune the wait-as-subscription (`tool.monitor`) stance | `senpi-codemode/src/prompt/eval-prompt.ts` (eval tool description), not this directory |
 | Tune GLM 5.x behavior | `glm-5.ts` `GLM5_TUNING` (both 5.2 and 5.3 render it) |
+| Add a V4.1 Flash rule against an observed trace | `deepseek-v4.ts` `DEEPSEEK_V4_RULES` — list `deepseek-v4-1-flash` in that rule's `presets` and render it from `deepseek-v4-1-flash.ts`; `prompt-presets-deepseek-v4-1-flash.test.ts` pins that no V4 rule leaks in by default |
 | Adjust model-id → preset matching | `presets.ts` `resolvePresetName()` |
 | User override via settings | `settings.ts` `PromptPresetName` |
 

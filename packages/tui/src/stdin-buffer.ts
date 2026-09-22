@@ -289,6 +289,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 	private timeout: ReturnType<typeof setTimeout> | null = null;
 	private readonly timeoutMs: number;
 	private readonly escapeTimeoutMs: number;
+	private mouseFragmentStartedAt?: number;
+	private discardingMouseFragment = false;
 	private pasteMode: boolean = false;
 	private pasteBuffer: string = "";
 	private pendingKittyPrintableCodepoint: number | undefined;
@@ -329,6 +331,17 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return;
 		}
 
+		if (this.discardingMouseFragment) {
+			const terminator = str.search(/[\x40-\x7e]/);
+			const escapeIndex = str.indexOf(ESC);
+			if (escapeIndex !== -1 && (terminator === -1 || escapeIndex < terminator)) {
+				str = str.slice(escapeIndex);
+			} else {
+				if (terminator === -1) return;
+				str = str.slice(terminator + 1);
+			}
+			this.discardingMouseFragment = false;
+		}
 		this.buffer += str;
 
 		if (this.pasteMode) {
@@ -389,6 +402,15 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 
 		const result = extractCompleteSequences(this.buffer);
 		this.buffer = result.remainder;
+		if (this.buffer.startsWith("\x1b[<")) {
+			this.mouseFragmentStartedAt ??= Date.now();
+			if (this.buffer.length > 64) {
+				this.buffer = "";
+				this.discardingMouseFragment = true;
+			}
+		} else {
+			this.mouseFragmentStartedAt = undefined;
+		}
 
 		for (const sequence of result.sequences) {
 			this.emitDataSequence(sequence);
@@ -427,6 +449,18 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 			return [];
 		}
 
+		if (this.buffer.startsWith("\x1b[<")) {
+			const remaining = 750 - (Date.now() - (this.mouseFragmentStartedAt ?? Date.now()));
+			if (remaining > 0 && this.buffer.length <= 64) {
+				this.timeout = setTimeout(() => this.flush(), remaining);
+			} else {
+				this.buffer = "";
+				this.mouseFragmentStartedAt = undefined;
+				this.discardingMouseFragment = true;
+			}
+			return [];
+		}
+
 		const sequences = [this.buffer];
 		this.buffer = "";
 		this.pendingKittyPrintableCodepoint = undefined;
@@ -441,6 +475,8 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.buffer = "";
 		this.pasteMode = false;
 		this.pasteBuffer = "";
+		this.mouseFragmentStartedAt = undefined;
+		this.discardingMouseFragment = false;
 		this.pendingKittyPrintableCodepoint = undefined;
 		this.decoder = new StringDecoder("utf8");
 	}

@@ -443,6 +443,11 @@ export interface AgentToolResult<T> {
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
 	 */
 	terminate?: boolean;
+	/**
+	 * Report a failure without throwing: `true` marks this result as a tool error while keeping
+	 * `content` and `details` intact for the model and renderers. Omitted or `false` means success.
+	 */
+	isError?: boolean;
 }
 
 /**
@@ -469,6 +474,8 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TDetails>,
 	) => Promise<AgentToolResult<TDetails>>;
+	/** Recovery policy for an effect whose durable intent exists but whose outcome is unknown. */
+	replay?: "never" | "safe";
 	/**
 	 * Per-tool execution mode override.
 	 * - "sequential": this tool acts as an exclusive barrier in parallel batches.

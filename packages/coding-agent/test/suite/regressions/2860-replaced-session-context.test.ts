@@ -117,9 +117,19 @@ describe("regression #2860: replaced session callbacks", () => {
 							customInstructions: options?.customInstructions,
 							replaceInstructions: options?.replaceInstructions,
 							label: options?.label,
+							expectedLeafId: options?.expectedLeafId,
 						});
 						return { cancelled: result.cancelled };
 					},
+					editAssistantMessage: async (entryId, text, options) => {
+						const result = await session.editAssistantMessage(entryId, text, {
+							summarize: options?.summarize,
+							customInstructions: options?.customInstructions,
+							expectedLeafId: options?.expectedLeafId,
+						});
+						return { cancelled: result.cancelled, unchanged: result.unchanged, entryId: result.entryId };
+					},
+					editUserMessage: (entryId, text, options) => session.editUserMessage(entryId, text, options),
 					switchSession: async (sessionPath, options) => runtime.switchSession(sessionPath, options),
 					reload: async () => {
 						await session.reload();

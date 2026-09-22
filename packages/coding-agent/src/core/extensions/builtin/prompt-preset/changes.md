@@ -1,5 +1,160 @@
 # prompt-preset Extension Changes
 
+## Kimi K2.8 Preview preset + Kimi Code rolling-id routing (2026-09-18)
+
+### What changed
+
+- `kimi-k2-code.ts` (new): the K2.7 tuning text moved here as `buildKimiK2CodePrompt(options, modelName)` - the execution-tooling stance in the `kimi` dialect plus the restrained outcome-first tuning, parameterized by the model name it announces. `kimi-k2-7.ts` and the new `kimi-k2-8.ts` are thin aliases over it (the `glm-5.ts` / `glm-5-{2,3}.ts` shape), so both prompts are byte-identical apart from `running on Kimi K2.7` / `running on Kimi K2.8`.
+- `presets.ts`: added `hasKimiK28Signal` / `isKimiK28Model` and dispatched `kimi-k2-8` ahead of `kimi-k2-7`. Both Kimi matchers now also accept Kimi Code's rolling product ids by exact match - `kimi-for-coding` (K2.8 Preview) and `kimi-for-coding-highspeed` (K2.7 Code HighSpeed) - alongside the version-tagged `kimi-k2(.|p|-)8` shapes.
+- `settings.ts`: `"kimi-k2-8"` joins `PromptPresetName` and `VALID_PRESETS`; `docs/settings.md`, this extension's `AGENTS.md`, and `builtin/AGENTS.md` list it.
+- Tests: new `test/suite/prompt-presets-kimi-k2-8.test.ts` covers the id shapes, the display-name path, settings forcing, model-level `promptPreset` metadata, the live Kimi Code catalog rows, and a byte-equality assertion that the K2.8 prompt is the K2.7 prompt with the model name swapped. `prompt-presets-execution-tooling.test.ts` adds `kimi-k2-8` to `PRESET_DIALECT`.
+
+### Why
+
+- Moonshot rolled K2.8 Preview out across Kimi Code on 2026-09-11 and kept the model id unchanged, so every Kimi Code session has been served by K2.8 while resolving to no preset at all - the Kimi dialect, the workstation dialect, and the tuning were all missing. The published model table is the evidence for both mappings: <https://www.kimi.com/code/docs/en/kimi-code/models.html> (checked 2026-09-18).
+- K2.8 is an efficiency and context upgrade inside the same K2 coding family rather than a new prompting contract, so it takes the K2.7 prompt verbatim instead of a bespoke one. Sharing a builder rather than copying the text keeps the two from drifting.
+- Rolling product ids carry no version signal, so they are matched by exact equality and re-checked when Moonshot next upgrades an id in place.
+
+### Why extension system couldn't handle this differently
+
+- This is the builtin `prompt-preset` extension's own model-family dispatch; no core prompt code changed.
+
+### Expected merge conflict zones on next upstream sync
+
+- LOW: the `presets.ts` Kimi matcher block and the Kimi rows in `prompt-presets-extension.test.ts` if upstream adds its own Kimi aliases.
+- LOW: `kimi-k2-code.ts` and `kimi-k2-8.ts` are new and fork-only; `kimi-k2-7.ts` shrank to an alias, so an upstream edit to its tuning text belongs in `kimi-k2-code.ts` instead.
+
+## DeepSeek V4.1 Flash catalog drift: provider-presence assertions (2026-09-12)
+
+### What changed
+
+- Tests: `packages/coding-agent/test/suite/prompt-presets-deepseek-v4-1-flash.test.ts` - the catalog sweep pinned the literal rows `deepseek/deepseek-v4-flash`, `openrouter/deepseek/deepseek-v4.1-flash`, and `vercel-ai-gateway/deepseek/deepseek-v4.1-flash`. The 2026-09-12 catalog regeneration (upstream 12f59336a + 713bdf38d adopted on merge) renamed the official row `deepseek-v4-flash` -> `deepseek-flash` (V4 Flash retired 2026-09-10), so the pin went stale while resolution stayed correct. The sweep now asserts the V4.1 set carries at least one row from the official `deepseek` provider and one from `opencode-go` (which renames its id between regenerations), with the zero-miss resolution check unchanged.
+
+### Why
+
+- Preset resolution (`hasDeepseekV41FlashSignal` + `isRetiredOfficialDeepseekV4FlashAlias` in `presets.ts`) already matches the regenerated ids (`normalizeModelId` lowercases, `deepseek-flash` and every `v4.1`/`v4p1`/`v4-1` shape hit the signal regexes); only the test pinned one spelling. Provider presence keeps the sweep non-vacuous without re-introducing id drift.
+
+### Expected merge conflict zones
+
+- LOW: test-only; the catalog sweep assertion block.
+
+## GPT-6 Astra: unbounded retries, a turn that ends only on a handle (2026-09-11)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/gpt-6-astra.ts`: `failure-cap` is deleted and replaced by `unbounded-retry` (same `failure-recovery` concern, same `Scope and Recovery` home): no attempt limit, a material change per attempt, an empty or thin lookup widens to another source before absence is a fact, files are restored to the last known-good state before a fresh approach, and the user is brought in only for a decision that is theirs. `turn-end-is-wait` keeps its emphasis but now states the condition: the turn ends when a pending handle will wake the session, and with nothing pending and work still open it keeps going. `approval-last` asks only for an answer the session cannot supply, carries the cost of stopping, and defaults `wait_for_answer` to false (true only for an irreversible next step). The Reporting sentence requires the named next step to be taken in the same turn and rejects a plan, hypothesis, status report, or offer to continue as a substitute for the work.
+- Tests: `packages/coding-agent/test/suite/prompt-presets-gpt-6-astra.test.ts` renames the rule id in both pinned tables and adds a contract case for the unbounded-retry and turn-end rules. The Reporting change is prose with no rule seam, so it ships with QA-by-read on the rendered prompt instead of a pinned sentence.
+
+### Why
+
+- A survey of the same 703 sessions found Astra ending 14.9% of its human-facing turns on a named next step it never took (claude-fable 3.0%, claude-opus 3.7%, kimi 3.1%), and 12.2% of them with open todos and no goal. Three rules produced that: `turn-end-is-wait` was the loudest rule in the file and made ending the turn unconditional; the Reporting sentence let announcing the next step stand in for taking it; and `failure-cap` capped attempts at three and terminated in a question, which for the model the Astra guide already describes as asking more and stopping earlier reads as permission to stop. Codex's own Astra template takes the opposite line ("Do not stop at acknowledging capability, proposing a plan, or offering to continue") and makes `request_user_input` non-blocking outside Plan mode, with Default mode telling the model to prefer reasonable assumptions and continue with best judgment.
+- Token cost (o200k via gpt-tokenizer; eval, read, bash, monitor, task, todo, request_user_input, ask_user_question selected): gpt-6-astra 3584 -> 3628 (+44). The first draft measured +107; the turn-end rule had re-listed the handles `async-default` already names, and `stay-direct-exceptions` carried its own do-not-trust-absence clause beside the new retry rule, so both were folded into one home. The remaining growth is the same-turn clause in Reporting, the cost-of-stopping sentence in `approval-last`, and the widen-the-source clause in `unbounded-retry`, each of which names a failure the survey measured. Rule count unchanged at 28.
+
+### Why an extension could not handle it
+
+- Content-only change inside a builtin preset's rule data; the behavior it corrects is the preset's own wording.
+
+### Expected merge conflict zones
+
+- MEDIUM: `gpt-6-astra.ts` TURN_END_IS_WAIT / APPROVAL_LAST / the failure-recovery rule and the Reporting paragraph are edited often; the rule id rename touches both pinned tables in the preset suite.
+
+## DeepSeek V4.1 Flash preset (2026-09-11)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/deepseek-v4-1-flash.ts`: new `deepseek-v4-1-flash` preset over the shared core - `buildExecutionToolingSection` in the claude dialect plus the claude workstation dialect, no tuning prose, and none of the `DEEPSEEK_V4_RULES`.
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/presets.ts`: `hasDeepseekV41FlashSignal` matches `deepseek-flash` (the official API name, also opencode-go), `deepseek-v4.1-flash` / `deepseek/deepseek-v4.1-flash[:thinking]`, `deepseek-ai/DeepSeek-V4.1-Flash`, fireworks' `deepseek-v4p1-flash`, venice's `deepseek-v4-1-flash`, and the display name; `isRetiredOfficialDeepseekV4FlashAlias` routes `deepseek-v4-flash` and `deepseek-v4-flash-vision-exp` on the `deepseek` provider to the V4.1 preset, and only there - the same names on every other provider keep the V4 preset. Resolves after the dated 0731 snapshot and before the generic flash alias.
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/settings.ts`: `deepseek-v4-1-flash` joins `PromptPresetName`.
+- Tests: `packages/coding-agent/test/suite/prompt-presets-deepseek-v4-1-flash.test.ts` (id-shape table, retired-alias routing per provider, non-matching ids, settings forcing, zero-miss catalog sweep, no V4 rule in the prompt, execution-tooling rendered only with `eval`, claude workstation dialect); `prompt-presets-deepseek-v4.test.ts` excludes the official provider's flash alias from its catalog expectation and adds the V4.1 prompt to its no-leak list.
+- Docs: `AGENTS.md` (this directory and `builtin/`), `docs/settings.md`.
+
+### Why
+
+- V4.1 Flash shipped 2026-09-10 (DeepSeek API changelog; `deepseek-flash` is the new name, V4 Flash and V4 Flash Vision Exp are retired and their names "temporarily routed to V4.1 Flash"). Every V4.1 id fell through `resolvePresetName` to the fallback prompt, and the official alias received the V4 Flash tuning for a model it no longer serves.
+- Prompt content per the prompt-engineering skill: the four V4 rules are category-C repairs for failures observed on V4-Flash-0731 transcripts. V4.1 Flash is a new pre-train (552B Causal Encoder-Decoder MoE, 45T tokens from scratch, RL across Claude Code / OpenCode / Pi / mini-SWE / DeepSeek Harness), so carrying those rules over would be a patch without a diagnosis. DeepSeek's own scaffold comparison (tech report Table 4, same checkpoint, max effort) puts the thinnest harness first: DSH Minimal - complete system prompt `You are a helpful software engineer assistant.` plus one bash tool - scores 90.6 on Terminal-Bench 2.1 vs 85.8 for DSH Standard, and mini-SWE / DSH Minimal lead DeepSWE v1.1 (74.2 / 72.6) over Claude Code 69.8, Pi 66.2, OpenCode 65.5; Appendix B.1: "We add no experimental system prompt." The preset therefore adds nothing the model already carries and keeps only senpi's own contract (routing line, stop condition, hard limits) and the eval-routing decision the tool description cannot make.
+- Token cost (o200k via gpt-tokenizer; read, edit, write, bash, eval, todo, grep, glob, task, ask_user_question selected; empty snippets): fallback 1566, deepseek-v4-flash 1909, deepseek-v4-1-flash 1835 with `eval` (the execution-tooling block) and 1557 without. The official-provider alias drops 74 tokens of V4 repair prose it no longer needs.
+- A V4.1-specific rule is added only against a V4.1 trace, by listing the preset in that rule's `presets`; the new test pins that no V4 rule leaks in by default.
+
+### Why extension system couldn't handle this differently
+
+- Preset matching is builtin extension data; a user can still force any preset through `promptPreset` in settings.
+
+### Expected merge conflict zones on next upstream sync
+
+- LOW: `presets.ts` matcher block and `resolvePresetName` order; `settings.ts` union.
+
+## Route user questions through the question tool (2026-09-10)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/gpt-6-astra.ts`: `approval-last` now routes the question through `request_user_input` (wait_for_answer true/false, proceed on no answers, never for permission requests) instead of "One focused question, then end the turn". `failure-cap` asks that precise question through `request_user_input` when it is available. `pause-transparency` adds that a skill/project exception is not itself an approval request. `initiative-bias` finishes every unblocked part when one part is outside reach. No rules added; emphasis set unchanged (the three asynchronous-execution rules).
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/gpt-5.6.ts`: the narrow-question stop line names `request_user_input` when it is available.
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/claude-fable-5-1.ts`, `claude-opus-5.ts`, `claude-fable-5.ts`: the ask sentence names `ask_user_question` when it is available (`waitForAnswer` true when the next step depends on the answer).
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/kimi-k3.ts`: the unblock question goes through `ask_user_question` when it is available.
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/glm-5.ts` (shared by `glm-5-2.ts` / `glm-5-3.ts`): the tuning paragraph asks through `ask_user_question` when only the user can settle a question.
+- Tests: `packages/coding-agent/test/suite/prompt-presets-gpt-6-astra.test.ts`, `prompt-presets-gpt-5-6.test.ts`, `prompt-presets-claude-fable-5-1.test.ts`, `prompt-presets-claude-opus-5.test.ts`, `prompt-presets-claude-fable-5.test.ts`, `prompt-presets-kimi-k3.test.ts`, `prompt-presets-glm-5-2.test.ts`, `prompt-presets-glm-5-3.test.ts` pin the tool-name sentinels. Captured RED on the test-only commit, GREEN after these edits.
+
+### Why
+
+- Category C (missing context) per the prompt-engineering skill. The presets still told the model to end the turn or ask in prose after the builtin question tool landed, so a question that should be `request_user_input` / `ask_user_question` looked like a blocked goal or a bare stop. The new clauses keep the existing ask trigger and add the route, including `when it is available` so a session without the tool still reads.
+- Token cost (o200k via gpt-tokenizer; eval, read, bash, monitor, task, todo, request_user_input, ask_user_question selected; empty snippets): gpt-6-astra 3491 -> 3586 (+95), gpt-5.6 2867 -> 2875 (+8), claude-fable-5-1 1654 -> 1676 (+22), claude-opus-5 1837 -> 1859 (+22), claude-fable-5 1690 -> 1713 (+23), kimi-k3 1901 -> 1910 (+9), glm-5.2/glm-5.3 1851 -> 1883 (+32). Astra overshoots the +60 growth gate because the four specified sentence edits land together; the other presets stay inside it. Rendered prompts with and without the question tools in `selectedTools` keep the same sentences.
+
+### Why extension system couldn't handle this differently
+
+- Content-only change inside builtin preset prose. The tool already exists; the models were not told to use it.
+
+### Expected merge conflict zones on next upstream sync
+
+- MEDIUM: `gpt-6-astra.ts` APPROVAL_LAST / FAILURE_CAP / PAUSE_TRANSPARENCY / INITIATIVE_BIAS and the Claude/Kimi/GLM/gpt-5.6 ask sentences are edited often.
+
+## Eval rules: batch what is independent, observe what is not (2026-09-09)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/execution-tooling.ts`: the shared Claude/Kimi rule set is now `eval-routing-decision` (independent reads, searches, symbol lookups, and probes go into one `eval` cell; edits, side-effecting commands, deploys, approvals, and result-dependent calls run one at a time, each observed before the next), `eval-evidence-return` (name the state a cell should produce, compare the returned evidence with it, check a mutating cell for changes beyond it; a result that hides a failed item or a truncated tail is not evidence), the new `perceived-state-loop` (a page, component, image, 3D scene, or layout gets one change, a render or screenshot, a look, then the next change; several angles for 3D, desktop and mobile widths for a page; compare with the reference or stated intent and ask only where two readings diverge), and the unchanged `eval-stay-direct`. `eval-default-surface` and `eval-real-code` are gone; cell mechanics (real code, per-item try/catch that keeps failures verbatim, truncation re-read) now live only in the eval tool description.
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/gpt-6-astra.ts` and `packages/coding-agent/src/core/extensions/builtin/prompt-preset/gpt-5.6.ts`: `eval-first-routing` is the same dependency decision in the Codex register (batch independent reads and inspect every result; keep edits, approvals, waits, and adaptive follow-ups sequential); `parallel-batching`, `over-call-bias`, and `in-kernel-reduction` are folded into it or replaced by `evidence-comparison` and `perceived-state-loop`. The two Astra eval rules lost their capitals and bold; only the three asynchronous-execution rules keep emphasis.
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/kimi-k3.ts`: the Working the Task paragraph carries a worked loop ("open the definition, file, or command you are about to rely on; make the change; run or render it; compare the result with the state you named; stop when they match") and "a definition, command, or file you have not opened is not a fact" in place of the bare read-before-claim sentence.
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/claude-fable-5-1.ts` and `packages/coding-agent/src/core/extensions/builtin/prompt-preset/claude-fable-5.ts`: the "extra read is cheap, a stale assumption costs the turn" clause is deleted from the core because the routing rule now carries it.
+- Tests: `packages/coding-agent/test/suite/prompt-presets-execution-tooling.test.ts` (rule table, plus a no-shouting check on the Kimi dialect), `packages/coding-agent/test/suite/prompt-presets-gpt-6-astra.test.ts` (rule and placement tables; emphasis set is the three async rules), `packages/coding-agent/test/suite/prompt-presets-gpt-5-6.test.ts` (rule and placement tables). Captured RED on the test-only commit (rule-set equality), GREEN after the rule change.
+
+### Why
+
+- Category B (misframing) per the prompt-engineering skill. "One cell per multi-call step, never a chain" is a call-count law; the information law is that batching is safe for calls whose results text can verify and wrong for calls whose next step depends on inspecting a result. A census of 5,187 pi-family sessions (2026-09-09) found ~580 "assumed instead of observed" moments; the code-mode share matched its base rate, but the mechanism shifted to batches hiding their own evidence: cells with two or more mutating operations returning under 800 characters rose from 16.7% to 22.6% after the 2026-09-04 directive (fable-5.1 17 -> 24%, opus-5 23 -> 30%), 24% of blank or failed cells were followed by proceeding as if they had succeeded, 14% of aggregate-only cells hid a detail the next step needed, and a frontend edit was followed by a screenshot 24% of the time. The user's own Blender report (2026-09-09) is the same failure: a script built the whole model at once and nothing looked at it.
+- Category C (missing context) for the visual loop: nothing told the model that a perceived result must be looked at after each change. Codex's Sol frontend guidance verifies with screenshots across viewports before finishing; Codex's Astra template batches independent reads, inspects every result, and keeps edits and adaptive follow-ups sequential - the same line this change draws.
+- Per-model: Claude keeps a tagged block with a few key verbs; Kimi gets positive prose, a worked loop, and no capitals (Moonshot's remedy for K3's excessive proactiveness is concrete constraints, not emphasis); GPT drops the capitals the GPT-5.6 guide warns compound with generic instructions and gains the truncated-output re-read that dominated its true cases (9 of 18).
+- Token cost (o200k, eval selected, 10 tools): fable-5-1 1735 -> 1754, fable-5 1771 -> 1790, opus-5 1898 -> 1937, opus-4-8 1984 -> 2055, gpt-6-astra 3509 -> 3557, gpt-5.6 2935 -> 2944, kimi-k3 1871 -> 2001, glm-5.3 1880 -> 1951; the eval tool description shrank 99-120 tokens for the Claude, Kimi, and default dialects, so a session nets negative for every family except Astra (+44, the new visual rule) and Kimi (+10, the worked loop).
+
+### Why extension system couldn't handle this differently
+
+- Content-only change inside builtin rule data and core templates.
+
+### Expected merge conflict zones on next upstream sync
+
+- LOW: all files are fork-only.
+
+## GPT-6 Astra: do the work yourself, open a new request once, consult memory before asking (2026-09-08)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/prompt-preset/gpt-6-astra.ts`: `delegation` now leads with the keep-it default ("Do the work yourself by default: whatever closes in a handful of calls is yours, and a follow-up on work you delegated is yours to take back, not to forward") and names the only thing that earns a subagent (a sizeable track independent of your own); the brief contents (deliverable, edit scope, stop condition, evidence) are unchanged. `foreground-exception`'s child-task clause reads "when its result would be your next input, either the work was small enough to do yourself or the child runs in the background" instead of "spawn it in the background and let the completion deliver it". The Intent Gate opens "a new request" rather than "every turn ... before anything else", and `steering` says a mid-task message steers rather than opening a new request, so the reply opens with the work under the reading already declared. New `memory-first` rule (concern `initiative`, rendered in `## Initiative` after `approval-last`): consult memory before asking anything it may already answer, and take this user's preferences and working habits from it. The file header records the observed inversion behind the delegation change.
+- `packages/coding-agent/test/suite/prompt-presets-gpt-6-astra.test.ts`: `memory-first` added to the concern and placement tables (captured RED on `aaf14cee8`: 1 failed | 33 passed, the rule-set equality at :254), plus a guard that the rendered `## Intent Gate` still carries the fork's `I read this as` sentinel that other suites and the README consume. Emphasis set unchanged.
+
+### Why
+
+- Category B (misframing) for delegation, per the prompt-engineering skill. The guide says Astra delegates less than a fan-out workflow wants, so the 2026-09-04 rule opened with "whenever running them beside your own work saves time or improves the result" and left "what you can close in a handful of calls, keep" as a trailer, while the 2026-09-05 async rules put "CHILD TASKS ... START IN THE BACKGROUND" in bold and `foreground-exception` ended on "spawn it in the background and let the completion deliver it". Under this fork's tools the observed behavior inverted: across 62 `~/.omo/agent/sessions` files from 2026-09-06..08 on the same tool surface, `task` + `task_send` were 39.4% of all tool calls for `opencodex/gpt-6-astra-fast` (3 sessions), 15.6% for `openai/gpt-6-astra`, 5.5% for `openai/gpt-6-astra-fast`, against 3.8% for claude-opus-4-8, 2.5% for claude-opus-5, 1.8% for claude-fable-5-1, and 1.6% for kimi-k3. The trace that triggered this change (session `01a07f74`, 2026-09-08): two consecutive `task_send` calls forwarding a one-`curl` token check and a one-key config change to a child it had spawned earlier, and when asked why, "bundling the log, KV, and request checks into one child seemed more efficient" - the efficiency trigger the rule itself supplied. The Claude and Kimi presets say "hand sizeable independent tracks to subagents ... keep work you can finish in a few calls yourself"; the Astra rule had dropped "sizeable" and inverted the order.
+- Category A (wrong information) for the routing line. "Open every turn with one short routing line before anything else" contradicted `steering` ("fold in corrections and constraints ... and keep going") for every mid-task message, and Astra follows the literal instruction: in the same session it opened four consecutive replies, including one to a steering message and one to a complaint, with a Korean restatement of the ask and the stop condition, which the user experienced as over-clarifying ("과질문하면서 명료하게 하고자하는 성향"). The routing line itself is the fork-wide contract every preset carries and stays; its scope is now the new request, matching the omo `gpt-5-4` / `kimi-k2-7` sisyphus prompts ("do not restate this on later turns of the same request").
+- Category C (missing context) for memory. `instruction-precedence` named memory only as something user instructions outrank; nothing routed the model to stored memory for this user's preferences before asking, and the user asked for exactly that ("메모리 적극 참조해서 사용자 성향 파악해서").
+- Token cost (o200k, changed segments only): 193 -> 281, +88. `memory-first` is +41 of that; `steering` +25 (the why-clause that supersedes a fresh line), `delegation` +14, `foreground-exception` +10, the gate opener -2. A first draft measured +112 and was tightened once (dropped "worth the hand-off", merged `steering` into one sentence). Nothing outside the five segments and the file header changed.
+- Not run: a live-model A/B. The 2026-09-05 backtest harness under `/tmp` is gone, bare senpi exposes no `task` tool (it comes from the omo-senpi plugin), and the codex backend was returning `server_is_overloaded` on 48-93% of Astra requests on 2026-09-08. The evidence for this change is the session survey above plus the rendered prompt.
+
+### Why extension system couldn't handle this differently
+
+- Content-only change inside this builtin's rule data and core template.
+
+### Expected merge conflict zones on next upstream sync
+
+- LOW: `gpt-6-astra.ts` and its test are fork-only.
+
 ## GPT-6 Astra: the subscription rule names `tool.monitor` and the trigger (2026-09-05)
 
 ### What changed

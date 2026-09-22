@@ -53,7 +53,9 @@ describe("goal cache-warm entry renderer", () => {
 		expect(text).toContain("Cache-warm wait · iteration 2");
 		expect(text).toContain("ready 2026-07-29 00:04 UTC (4m 30s)");
 		expect(text).toContain("1 wake source on duty");
+		expect(text).toMatch(/resumes as soon as a wake source\s+delivers/);
 		expect(text).toMatch(/5m\s+prompt-cache TTL/);
+		expect(text).not.toContain("stays inside");
 		expect(text).toContain("~120K tokens kept warm");
 		expect(text).toContain("$0.324 saved");
 	});
@@ -112,6 +114,7 @@ describe("goal cache-warm entry renderer", () => {
 			cache: { ttlSeconds: 300, cachedTokens: 120_000, estimatedSavedUsd: 0.324 },
 		});
 		expect(scheduled).toContain("TTL may elapse");
+		expect(scheduled).toContain("resumes as soon as a wake source delivers");
 		expect(scheduled).not.toContain("stays inside");
 		expect(scheduled).not.toContain("kept warm");
 		expect(scheduled).not.toContain("saved");
@@ -138,6 +141,8 @@ describe("goal cache-warm entry renderer", () => {
 		});
 		expect(text).toContain("Cache-warm wait");
 		expect(text).toContain("1 wake source on duty");
+		expect(text).toContain("Stall backstop");
+		expect(text).toContain("resumes as soon as a wake source delivers");
 		expect(text).not.toContain("tokens");
 	});
 

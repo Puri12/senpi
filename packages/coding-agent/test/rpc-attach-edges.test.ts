@@ -100,6 +100,35 @@ describe("RPC attachment edge regressions", () => {
 		expect(registry.list()).toEqual([]);
 	});
 
+	test("cancels pending UI requests only when the last attachment releases the session", async () => {
+		const { dir, registry } = await setup();
+		const writer = new SessionEventWriter(() => {});
+		for (const connection of ["owner", "peer"])
+			writer.registerConnection(connection, { writeRaw: () => {}, waitForBackpressure: async () => {} });
+		let cancellations = 0;
+		const router = new SessionCommandRouter(registry, writer, { cwd: dir }, async () => ({
+			handle: async () => {},
+			cancelPendingExtensionUiRequests: () => {
+				cancellations += 1;
+			},
+			dispose: async () => {},
+		}));
+		const path = join(dir, "shared-question.jsonl");
+		await writer.withConnection("owner", () => router.handle(open(dir, path)));
+		await writer.withConnection("peer", () => router.handle(open(dir, path)));
+		expect(registry.list()).toHaveLength(1);
+
+		// The session-opening connection drops while another attachment survives:
+		// a pending question is session-owned and must stay answerable.
+		await router.releaseConnection("owner");
+		expect(cancellations).toBe(0);
+		expect(registry.list()[0]?.status).toBe("open");
+
+		await router.releaseConnection("peer");
+		expect(cancellations).toBe(1);
+		expect(registry.list()).toEqual([]);
+	});
+
 	test("disconnect waits for an in-flight open before releasing its reservation", async () => {
 		let releaseRuntime!: () => void;
 		const runtimeReady = new Promise<void>((resolve) => {

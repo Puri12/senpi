@@ -1,11 +1,14 @@
-import { copyFileSync, existsSync, mkdirSync } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { basename, join, parse, resolve } from "node:path";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
+import type { HostMcpRegistry } from "./extensions/builtin/mcp/host-registry.ts";
 import type {
 	ProjectTrustContext,
 	ReplacedSessionContext,
+	SessionContext,
+	SessionKind,
 	SessionShutdownEvent,
 	SessionStartEvent,
 } from "./extensions/index.ts";
@@ -13,6 +16,7 @@ import { type ExtensionRunner, emitSessionShutdownEvent } from "./extensions/run
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
 import { SessionManager } from "./session-manager.ts";
+import { reserveSessionWrite, unregisterSessionWriter } from "./session-write-reservation.ts";
 
 /**
  * Result returned by runtime creation.
@@ -31,6 +35,19 @@ export interface AgentSessionLaunchProfile {
 	permissionPreset?: string;
 	creationModel?: { provider: string; modelId: string };
 	initialThinkingLevel?: string;
+	/**
+	 * Visibility class of this session (`open_session.kind`), absent for classic
+	 * launches. It reaches the extensions this session loads and nothing else: it
+	 * never takes part in auth, model or resource resolution.
+	 */
+	sessionKind?: SessionKind;
+	/** Opaque labels the opener attached (`open_session.context`), absent when none. */
+	sessionContext?: SessionContext;
+	/**
+	 * Per-session auto-titling (`open_session.auto_title`). When set, this session
+	 * ignores the host-wide `--auto-title-sessions` / appMode default.
+	 */
+	autoTitle?: boolean;
 }
 
 /**
@@ -43,6 +60,7 @@ export interface AgentSessionLaunchProfile {
 export type CreateAgentSessionRuntimeFactory = (options: {
 	cwd: string;
 	agentDir: string;
+	mcpRegistry?: HostMcpRegistry;
 	sessionManager: SessionManager;
 	sessionStartEvent?: SessionStartEvent;
 	projectTrustContext?: ProjectTrustContext;
@@ -151,6 +169,12 @@ export class AgentSessionRuntime {
 		this.beforeSessionInvalidate = beforeSessionInvalidate;
 	}
 
+	/** Attachment transitions are ordered by the RPC entry's lifecycle mutex. */
+	async emitAttachmentEvent(type: "session_parked" | "session_resumed"): Promise<void> {
+		const runner = this.session.extensionRunner;
+		if (runner.hasHandlers(type)) await runner.emit({ type });
+	}
+
 	private async emitBeforeSwitch(
 		reason: "new" | "resume",
 		targetSessionFile?: string,
@@ -205,7 +229,11 @@ export class AgentSessionRuntime {
 			targetSessionFile,
 		});
 		this.beforeSessionInvalidate?.();
+		const replaced = this.session.sessionManager;
 		this.session.dispose();
+		// Nothing writes to the replaced manager once its session is disposed, so the
+		// shared host may hand its session file to another worker.
+		unregisterSessionWriter(replaced);
 	}
 
 	private async reportRemovedExtensions(): Promise<void> {
@@ -418,15 +446,24 @@ export class AgentSessionRuntime {
 			mkdirSync(sessionDir, { recursive: true });
 		}
 
-		const destinationPath = join(sessionDir, basename(resolvedPath));
+		let destinationPath = join(sessionDir, basename(resolvedPath));
+		const sourceAlreadyStored = resolve(destinationPath) === resolvedPath;
+		if (!sourceAlreadyStored) {
+			const { name, ext } = parse(destinationPath);
+			let suffix = 1;
+			while (existsSync(destinationPath)) {
+				destinationPath = join(sessionDir, `${name}-${suffix++}${ext}`);
+			}
+		}
 		const beforeResult = await this.emitBeforeSwitch("resume", destinationPath);
 		if (beforeResult.cancelled) {
 			return beforeResult;
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		if (resolve(destinationPath) !== resolvedPath) {
-			copyFileSync(resolvedPath, destinationPath);
+		reserveSessionWrite(destinationPath);
+		if (!sourceAlreadyStored) {
+			copyFileSync(resolvedPath, destinationPath, constants.COPYFILE_EXCL);
 		}
 
 		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);

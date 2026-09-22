@@ -575,4 +575,34 @@ describe("CombinedAutocompleteProvider", () => {
 			assert.strictEqual(applied.lines[0], '"my folder/test.txt"');
 		});
 	});
+
+	describe("dollar skill token boundaries", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[{ name: "skill:commit", description: "Commit changes" }],
+			"/tmp",
+		);
+
+		it("offers a skill after ordinary prompt text at a token boundary", async () => {
+			const line = "text $com";
+			const result = await getSuggestions(provider, [line], 0, line.length);
+
+			assert.ok(result, "Expected a dollar skill suggestion");
+			if (!result) return;
+			assert.strictEqual(result.prefix, "$com");
+			assert.deepStrictEqual(
+				result.items.map((item) => item.value),
+				["$commit"],
+			);
+
+			const applied = provider.applyCompletion([line], 0, line.length, result.items[0]!, result.prefix);
+			assert.strictEqual(applied.lines[0], "text $commit ");
+			assert.strictEqual(applied.cursorCol, "text $commit ".length);
+		});
+
+		it("does not hijack shell-like dollar syntax or complete prose words", async () => {
+			assert.strictEqual(await getSuggestions(provider, ["text $HOME"], 0, 10), null);
+			assert.strictEqual(await getSuggestions(provider, ["echo $1"], 0, 7), null);
+			assert.strictEqual(await getSuggestions(provider, ["please use $commit"], 0, 18), null);
+		});
+	});
 });

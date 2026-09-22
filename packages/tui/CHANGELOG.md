@@ -12,6 +12,446 @@
 
 ### Removed
 
+## [2026.9.22] - 2026-09-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.21-2] - 2026-09-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.21] - 2026-09-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+- Updated the bundled dependencies: marked 18.0.11 -> 18.0.13 and get-east-asian-width 1.6.0 -> 1.7.0. ([#1895](https://github.com/code-yeongyu/senpi/issues/1895))
+
+### Fixed
+
+### Removed
+
+## [2026.9.20] - 2026-09-20
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Keyboard input no longer dies after clicking a mouse-enabled row such as an ask-user question option or its Submit line. A click decorator that cannot receive keys never becomes the focus owner, and a focus change made by the click handler is no longer overwritten by the mouse focus application.
+
+### Removed
+
+## [2026.9.19-2] - 2026-09-19
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.19] - 2026-09-19
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-6] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-5] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-4] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-3] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-2] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17-4] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17-3] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17-2] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.16-3] - 2026-09-16
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.16-2] - 2026-09-16
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.16] - 2026-09-16
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.15-2] - 2026-09-15
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.15] - 2026-09-15
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.13-2] - 2026-09-13
+
+### Breaking Changes
+
+### Added
+
+- Added opt-in, lease-scoped regular-mode mouse clicks with shared SGR parsing, committed-layout hit testing, private cursor-position calibration, and fail-closed handling of uncertain frame placement. Fullscreen selection and scrolling remain unchanged ([#1645](https://github.com/code-yeongyu/senpi/issues/1645)).
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.13] - 2026-09-13
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.12-3] - 2026-09-12
+
+### Breaking Changes
+
+### Added
+
+- Added fullscreen mouse input: `TuiAltScreen` normalizes press, release, click, move, drag, and wheel events, components can implement `handleMouse(event)`, and the new `MouseRegion` component adds pointer behavior without changing rendering. `Input`, `Editor`, `SelectList`, and `SettingsList` respond to clicks and hover in alternate-screen mode.
+- Added platform-native helpers for modifier-key state and asynchronous text/image clipboard access on macOS (`darwin-platform.node`), Windows (`win32-platform.node`), and Linux (`native/linux`), replacing the previous modifier-only and console-mode addons.
+- Added five-times-faster mouse wheel scrolling while holding Alt in fullscreen mode ([#9166](https://github.com/earendil-works/pi/pull/9166) by [@xl0](https://github.com/xl0)).
+- Added a `TuiAltScreen` `scrollToEndIndicator` option that renders a clickable jump-to-end label on a follow-end primary scroll view while it is scrolled away from the end ([#9080](https://github.com/earendil-works/pi/pull/9080) by [@rwachtler](https://github.com/rwachtler)).
+
+### Changed
+
+- Changed fullscreen scrollbars to render muted thin tracks with contrasting proportional two-cell-minimum thumbs, preserve underlying backgrounds without inheriting foreground styles, reserve an unstyled column in `always` mode, reveal hidden `auto` tracks on pointer entry, expand the same-colored thumb on hover, and support track-click jumping in addition to thumb dragging. `ScrollView` exposes `scrollbarTrackStyle` and `scrollbarThumbStyle` for themes.
+- Changed fullscreen transcript search to use a bordered, placeholder-based input with a muted result count, right-aligned clickable key-and-arrow buttons with configurable hover styling, and open-shortcut toggling.
+- Reduced fullscreen transcript search latency on large transcripts by caching unchanged search results, indexing ASCII runs, and limiting highlight work to visible matches ([#8800](https://github.com/earendil-works/pi/pull/8800) by [@cristinaponcela](https://github.com/cristinaponcela)).
+
+### Fixed
+
+- Fixed mouse hover changing selection and recentering autocomplete and settings lists, causing clicks to target a different item.
+
+### Removed
+
+## [2026.9.12-2] - 2026-09-12
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.12] - 2026-09-12
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.11] - 2026-09-11
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Complete skill hints for `$` tokens at valid prompt boundaries while preserving literal shell variables such as `$HOME` and `$1` ([#1575](https://github.com/code-yeongyu/senpi/issues/1575)).
+- Keep dollar skill autocomplete active on multiline drafts and follow-up input while streaming ([#1590](https://github.com/code-yeongyu/senpi/issues/1590)).
+
+### Removed
+
+## [2026.9.10-2] - 2026-09-10
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.10] - 2026-09-10
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.9-2] - 2026-09-09
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.9] - 2026-09-09
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.8] - 2026-09-08
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.7-2] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.7] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.6] - 2026-09-06
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
 ## [2026.9.5-3] - 2026-09-05
 
 ### Breaking Changes

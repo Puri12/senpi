@@ -1,5 +1,292 @@
 # claude-sdk-oauth
 
+## 2026-09-17 - Re-login refreshes the slot in place; all-blocked guidance names auth failures (omo#7084, omo#8383)
+
+### What changed
+
+- `accounts.ts`: new `upsertAccount()` — a same-name slot is replaced in place with fresh token material, its block stamps cleared, and its `displayName` preserved; unknown names still append.
+- `oauth-login.ts`: a re-login now targets an existing slot instead of minting `account-N+1`. The recovery target is identity-safe: a lone slot, or the pool's one `auth_error`-blocked slot, is refreshed in place; anything else stays append-only unless the user types an existing name, so a blank or headless re-login never overwrites the newest working slot in a multi-account pool. The Anthropic import is now a move — accepting it calls the new `removeAnthropicCredential` dep so one single-use grant never lives in two stores.
+- `index.ts`: wires `removeAnthropicCredential` through the locked auth.json backend (`FileAuthStorageBackend.withLockAsync`).
+- `affinity.ts`: `AllAccountsBlockedError` carries the dominant block reason (`auth_error` when any slot is auth-blocked).
+- `guidance.ts` / `stream-guidance.ts`: the all-blocked guidance for an auth-dominated pool names the authentication failure and the re-login action, so the outer credential-pool classifier maps it to `auth_error` instead of laundering it into a rate-limit cooldown via the generic "(rate limit or auth errors)" wording (omo#8383).
+
+### Why
+
+- Two field reports on 2026.9.16-3: `/claude-account list` showed `default | login | blocked until re-login` and re-login returned to the same state. The lane stamped `auth_error` permanently ("until login refreshes the slot") while `login()` only ever appended or threw on a duplicate name, so the documented recovery could never fire. The import path also forked the Anthropic grant into two stores, guaranteeing a later `invalid_grant`.
+
+### Why an extension could not handle it
+
+- The slot store, the OAuth login flow, and the failover block policy are lane internals; the recovery contract lives inside the lane's own auth.json stamps.
+
+### Expected merge conflict zones
+
+- `oauth-login.ts` (login naming and the import branch).
+
+## 2026-09-16 - Keep the binding across a provider excursion and report the recorded invalidation cause (senpi#1747)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/session-registry-wiring.ts`: the `model_select` handler no longer invalidates when the newly selected model belongs to another provider. It now uses the existing `keepBindingThenClose`, exactly like `thinking_level_select` and the in-provider `switchSessionModel` failure branch, so the live SDK session closes while the binding and its sidecar survive. The same file now also carries the ledger invalidation cause into process memory: `persistBindingInvalidation` records it as it appends the record, `session_start` re-reads it from the branch on a restart (clearing it for `new`), and the `message_end` marker retires it.
+- `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/session-binding.ts`: adds `invalidationReasonFromBranch`, which returns the reason of the newest binding ledger record when that record is an invalidation (a later marker retires it).
+- `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/session-reattach.ts`: holds the pending invalidation reason per senpi session id (`rememberBindingInvalidation`, `bindingInvalidationReason`) next to the binding map it replaces.
+- `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/session-continuity.ts`: `ContinuityDecisionInput` accepts `invalidationReason`, and a `bootstrap`/`flatten` that would report the no-record default `registry_miss` reports the recorded cause instead (`model_selected`, `extensions_removed`, `assistant_rewritten` pass through the observation vocabulary; `compaction`, `tree_changed` and `fork` map to `tainted_compaction`, `branch_diverged` and `tainted_fork`). Classification is unchanged: no decision kind moves, and every other reason is left as decided.
+- `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/session-stream.ts`: passes the pending reason into the decision input.
+
+### Why
+
+- Cycling the model selector away from Claude and back re-sent the whole conversation (field reports of hundreds of KB per turn, one measured at 226 messages / ~881 KB) because the excursion destroyed a perfectly resumable binding. The module already had the non-destructive path for exactly this situation; the reattach path handles the return trip through `sentPrefixHash` / `commonPrefixLength` with `from: binding.sentCount`, so only the messages added while away are sent. Every safety net still decides the return trip: `identityDrift` flattens on `model_changed`, an unconfirmed SDK session id is refused, and a missing transcript or a diverged sent stream still flattens.
+- The invalidation reason was written to the ledger and never read back, so a genuine invalidation (`model_selected`, `compaction`, `tree_changed`, `extensions_removed`) surfaced to the user as `registry_miss` - the reason that is supposed to mean "no record was ever found".
+
+### Why an extension could not handle it
+
+- The model-selector lifecycle wiring, the binding ledger and the continuity decision table are this provider extension's own internals; no extension surface can observe or replace them.
+
+### Expected merge conflict zones
+
+- MEDIUM: the `session_start` and `model_select` handlers in `session-registry-wiring.ts`.
+- LOW: the binding map in `session-reattach.ts`, the branch readers in `session-binding.ts`, the decision-input type and the `decideNativeContinuity` entry point in `session-continuity.ts`, the decision-input construction in `session-stream.ts`.
+
+## 2026-09-11 - Detect same-tick settings rewrites
+
+### What changed
+
+- `settings.ts`: the cached provider-settings loader now keys its manager cache on a SHA-256 content revision rather than `mtimeMs:size`, so a rewrite made within one filesystem mtime tick is observed.
+
+### Why
+
+- Linux filesystems can preserve the same mtime for two rapid writes, leaving the loader with stale provider settings despite its re-read contract.
+
+### Why an extension could not handle it
+
+- The cache and its invalidation key are owned by this provider extension's settings loader.
+
+### Expected merge conflict zones
+
+- LOW: `settings.ts` around `settingsFingerprint`.
+
+
+## 2026-09-10 - Optional Claude account display names (senpi#1495)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/accounts.ts`: `AccountSlot` carries optional `displayName`; immutable `name` remains the operational identity.
+- `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/account-management.ts`: explicitly projects safe display metadata alongside existing secret-free account descriptors.
+- `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/account-command.ts`: adds rename/clear-name and renders display labels for listings, the pinned-account line and the affinity pick. Post-login naming is delegated to the shared helper, which offers it only for a machine-generated slot ID, so the lane's own "Name for this account" prompt is never followed by a second name prompt. Existing slot creation names, sentinel envelope, refresh, failover, affinity and session continuity are unchanged.
+
+### Why
+
+- `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/accounts.ts`, `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/account-management.ts` and `packages/coding-agent/src/core/extensions/builtin/claude-sdk-oauth/account-command.ts`: readable labels must not change the account IDs responsible for Claude credentials, config roots and SDK session bindings.
+
+### Why an extension could not handle it
+
+- These three paths are the provider extension's own types and command surfaces. The shared locked metadata operation and login receipt are implemented below this extension.
+
+### Expected merge conflict zones
+
+- LOW: slot shape in `accounts.ts`; descriptor mapper in `account-management.ts`; imports, command hints and list/add handlers in `account-command.ts`.
+
+## 2026-09-10 - Never list a sentinel-material stored slot as an account
+
+### What changed
+
+- `accounts.ts`: `isSentinelSlot` recognizes a stored account whose `access` and `refresh` are both the managed sentinel, and `listAccounts` filters those out.
+- `test/claude-sdk-oauth-accounts.test.ts`: a pool holding a real account plus a generated `login-2` sentinel slot lists only the real one.
+
+### Why
+
+- A shipped build stored this credential's own flat sentinel projection as a generated `login-N` slot. Selecting it fails the provider's auth check and dead-ends the request. The coding-agent auth store heals the stored entry on load (see the core tracker); this filter covers the extension's own direct reads (`readStoredCredential`) so a poisoned entry can never be selected even before that repair runs.
+
+### Why an extension could not handle it
+
+- The account listing is this provider's own pool surface.
+
+### Expected merge conflict zones
+
+- LOW: `storedSlots` filtering in `accounts.ts`.
+
+## Recording a refused model switch keeps the stored binding (2026-09-10)
+
+### What changed
+
+- `session-binding.ts`: `model_change_rejected` joins `LEDGER_ONLY_ENTRY_TYPES`.
+
+### Why
+
+- `bindingFromStoredBranch` fails closed on any entry after the committed assistant that the model could see. The new `model_change_rejected` entry (#1526) is never projected into the LLM context, but it was absent from the set, so recording a refused switch made a later resume discard the stored SDK session: fresh upstream session, full context re-send, prompt-cache loss - caused by an entry the model never sees.
+
+### Why an extension could not handle it
+
+- The set is the builtin's own resume-admission policy.
+
+### Expected merge conflict zones
+
+- LOW: `LEDGER_ONLY_ENTRY_TYPES`.
+
+## 2026-09-10 - Detach completed resume initialization abort listeners
+
+### What changed
+
+- `session-reattach.ts`: the abort listener that bounds `initializationResult`
+  is now removed in a `finally` block after initialization settles.
+- `test/claude-sdk-oauth-reattach.test.ts`: cover both successful initialization
+  followed by normal request cleanup and genuine abort during pending
+  initialization.
+
+### Why
+
+- The request controller is also aborted during normal completed-request
+  cleanup. Leaving the initialization listener attached closed a healthy
+  resumed query after initialization, forcing the next turn through another
+  resume and eventually a full-history cache write.
+- Pending and pre-aborted initialization still closes the query and rejects, so
+  cancellation remains fail-closed while completed initialization no longer
+  has a stale listener.
+
+### Expected merge conflict zones
+
+- LOW: `session-reattach.ts` initialization helper and the adjacent reattach
+  regression test; no public API or generated bundle changes.
+
+## 2026-09-10 - Validate the Claude Code executable before the SDK spawns it, fall back to PATH
+
+### What changed
+
+- `executable.ts`: `ExecutableDeps` gains `isFile`. `describeClaudeCodeExecutable` walks `CLAUDE_CODE_EXECUTABLE`, the compiled-Bun extraction, the platform sidecar package(s) resolved through `createRequire` rooted at the imported `@anthropic-ai/claude-agent-sdk` instance, then `claude` on PATH - and accepts a candidate only once its spawnable spelling (`path.resolve`, plus `path.toNamespacedPath` on win32 so it carries the `\?\` prefix) is a regular file in this process. `resolveClaudeCodeExecutable` returns that spelling or throws senpi's own error naming every candidate tried. `overrideExecutableDeps` / `resetExecutableDeps` expose the deps for tests the way `overrideSdkBoundary` does.
+- `executable-path-lookup.ts` (new): `findExecutableOnPath` - the `where claude` / `command -v claude` walk with no shell, honouring `PATHEXT` on win32 and skipping anything that is not a regular file.
+- `availability.ts`: `describeClaudeLane` reports the same resolution the query path uses (`executable`, `tried`) plus the host `runtime` (`bun` | `node`) for a doctor surface; the ambient probe already shares the resolver, so a path this process cannot stat is never spawned.
+
+### Why
+
+- code-yeongyu/senpi#1541: on a Windows npm-global `omo-ai` install the win32-x64 sidecar resolved (it was hoisted to `omo-ai/node_modules/`) but the SDK reported `Claude Code native binary not found at <that path>` although Explorer showed the file. senpi handed the SDK the first `require.resolve` hit unvalidated, honoured `CLAUDE_CODE_EXECUTABLE` unvalidated, and had no fallback to the working `claude.exe` on PATH; the SDK's generic wrapper then reported the miss.
+
+### Why an extension could not handle it
+
+- The executable string is chosen inside the builtin provider before `query()` is called; no extension hook runs between resolution and `pathToClaudeCodeExecutable`.
+
+### Expected merge conflict zones
+
+- LOW: `executable.ts` is fork-only; `availability.ts` grows an export above `createAmbientAuthStatusReader`. `executable-path-lookup.ts` is new. Tests: `test/claude-sdk-oauth-executable*.test.ts`, `test/claude-sdk-oauth-availability.test.ts`.
+
+## 2026-09-09 - Classify multi-message cold starts as bootstrap
+
+### What changed
+
+- `session-stream.ts`: `createResidentAttempt` now identifies a first turn by the absence of any prior assistant message in `input.context.messages`, while retaining the no-resident-entry and no-persisted-binding checks. A fresh context can therefore bootstrap even when injected context and the actual prompt produce multiple transmitted user messages; a cold start after an assistant turn remains `flatten` with `registry_miss`.
+- `claude-sdk-oauth-bootstrap-classification.test.ts` covers both observations through the resident session-stream fake SDK boundary.
+
+### Why
+
+- A multi-message first turn was incorrectly shown as `Session continuity lost - resent the full conversation (registry_miss)` even though no SDK session existed and nothing could have been lost. This was reported on Discord by samaronejr on 2026-09-09 while opening a second concurrent OmO session.
+
+### Why an extension could not handle it
+
+- The `firstTurn` predicate is private to the builtin resident admission path, before any extension-facing stream result or continuity observation is emitted.
+
+### Expected merge conflict zones
+
+- LOW: `session-stream.ts` next to the `createResidentAttempt` `firstTurn` predicate and the focused bootstrap classification test.
+
+## 2026-09-08 - `/claude-account add` relays login prompts through the shared account-command interaction
+
+### What changed
+
+- `account-command.ts`: `addAccount` builds its `AuthInteraction` with `createExtensionLoginInteraction` from `../oauth-login-interaction.ts` instead of a local relay that sent every prompt to `ctx.ui.input(prompt.message)`. Prompts now honour their type and placeholder and are dismissed when the provider aborts them; `auth_url` opens the browser in the TUI and `device_code` prints the user code. `ClaudeAccountCommandDeps` gains an optional `openBrowser` so tests can observe the launch. The local `authEventMessage` helper is gone.
+
+### Why
+
+- code-yeongyu/senpi#1485 fixed the same relay shape in `/gpt-account add`; the Claude command shared the placeholder, per-prompt-signal and browser gaps, so both commands now use one implementation.
+
+### Why an extension could not handle it
+
+- The command is registered by the builtin provider extension and drives `modelRuntime.login` directly; no user extension can interpose on that relay.
+
+### Expected merge conflict zones
+
+- LOW: `account-command.ts` import block, `ClaudeAccountCommandDeps`, and `addAccount`. Fork-only file.
+
+## 2026-09-07 - Restart bindings survive ledger entries appended after the committed assistant
+
+### What changed
+
+- `session-commit-boundary.ts`: `assistantContentHash` fingerprints only the semantic payload of each block - `text`, `thinking` (text and signature), and `toolCall` `{id, name, arguments}` - plus role/api/provider/model. Timing stamps, streaming indices, partial JSON, and any other transport metadata no longer participate; an unknown block shape is still hashed whole (fail-closed).
+- `session-binding.ts`: `bindingFromStoredBranch` no longer requires the committed assistant to sit immediately after the marker, and no longer checks the suffix against a hard-coded allowlist of custom types. The committed assistant is the first `message` entry after the marker; every entry the session-manager never projects into the LLM context (`custom` of any type, `label`, `session_info`, `thinking_level_change`, `model_change`, `configuration_update`, plus the goal-continuation `custom_message`) is admitted before and after it. Entries the model can see - `message`, any other `custom_message`, `compaction`, `branch_summary` - still fail closed.
+
+### Why
+
+- oh-my-openagent#7925 (`assistant_rewritten` cascade): the commit boundary compared a hash taken at the last `message_update` with the `message_end` message. Both carry the same answer, but the stream pipeline keeps stamping metadata around it after the last update (senpi#691 fixed one such field, thinking timing, by denylisting it). Every new volatile field re-opens the same hole: a plain turn commits as `rewritten`, the next turn forks or flattens, and after a flatten there is no earlier assistant boundary so every following turn flattens again with the whole conversation. Allowlisting the semantic payload closes the class instead of the instance; an extension that actually rewrites text, thinking, or tool arguments is still detected.
+- oh-my-openagent#7925: every `omo --session <id>` resume cold-seeded with `registry_miss` and the sidecar vanished. The co-resident memory extension appends `custom` ledger records after each turn and one more on every `session_start`, none of which were in the allowlist, so the next restart deleted a valid sidecar. The allowlist had already been patched twice for the same defect class (stop hooks, rule scans, goal warm-ups); the correct invariant is "never reaches the model", which the entry type decides, not the writer.
+
+### Why an extension could not handle it
+
+- The sidecar validation is private to this builtin's restart path; no extension hook observes it.
+
+### Expected merge conflict zones
+
+- MEDIUM: `session-binding.ts` around `bindingFromStoredBranch` and the retired `SAFE_BINDING_SUFFIX_TYPES` allowlist.
+- LOW: `session-commit-boundary.ts` around `assistantContentHash`.
+
+## 2026-09-07 - Emit one continuity observation per turn (discarded attempts stay silent)
+
+### What changed
+
+- `session-turn-attempt.ts`: `staged.emit()` moved out of the attempt generator's `finally` onto the retained-completion path. A discarded attempt (account failover unwinds the generator via `return()`) and an internally-failed attempt (throws to `catch`) now emit nothing; only an attempt consumed to completion emits, so a turn yields exactly one continuity observation. A turn where every attempt fails still yields the single terminal observation from `residentSessionMessages`.
+
+### Why
+
+- senpi#1432 follow-up: the observability contract (session-observability.ts head comment and the AGENTS.md invariant) promises exactly one observation per completed turn, but the `finally` emitted the discarded attempt's staged decision too. A two-account failover turn therefore logged two `claude_sdk_oauth_session_continuity` events (the discarded `delta` plus the retained `fork`), and a fully-failed turn logged its staged decision plus the terminal error - inflating the continuity counts the #1432 report was built on.
+
+### Why an extension could not handle it
+
+- The attempt lifecycle and the staged-observation emit are private to this builtin provider; no extension hook observes attempt retention.
+
+### Expected merge conflict zones
+
+- LOW: `session-turn-attempt.ts` around the generator `try/catch` tail (the removed `finally`).
+
+
+## 2026-09-07 - Reattach across account failover; retire the unwired failover decision
+
+### What changed
+
+- `session-continuity.ts`: `ContinuityDecisionInput.crossAccountResumeSupported` is a required boolean, filled by `session-stream.ts` from `auth.authLane !== "config-dir"`. `decideFromBinding` flattens account drift only with `cross_root_unsupported` on the config-dir lane; otherwise it falls through to the retry checkpoint (same-turn failover forks at the pre-turn boundary with reason `timeout_retry`) and the prefix checks (a matching prefix reattaches with reason `account_changed`). `model_changed` still flattens.
+- Removed `decideFailoverContinuity`, `FailoverContinuityInput`, `FailoverLane`, and `test/claude-sdk-oauth-failover-continuity.test.ts`. Tests were flipped in `claude-sdk-oauth-restart-binding-drift.test.ts`, `claude-sdk-oauth-restored-security.test.ts`, and `claude-sdk-oauth-continuity-retry-checkpoint.test.ts`; added regression coverage in `suite/regressions/1432-claude-sdk-oauth-failover-reattach.test.ts`.
+
+### Why
+
+- Issue #1432: on multi-account sessions a rate-limited attempt is discarded (`session-turn-attempt.ts` `discard()` closes the live entry), the next account's attempt takes the binding path, and `decideFromBinding` flattened on `account_changed` before the retry checkpoint could run, so every failover re-sent the whole conversation (observed 100 `flatten`/`account_changed` in one day, count up to 409). The session-stable HRW ranking re-selects the primary account when its 60 s block expires, so the cycle repeated. `decideFailoverContinuity` (3b8a5f828, 2026-08-01) described the intended behavior but was never called, and the "shared-root lanes reattach on failover" invariant documented below was never implemented.
+
+### Why an extension could not handle it
+
+- The decision table and the binding admission are private to this builtin.
+
+### Expected merge conflict zones
+
+- MEDIUM: `session-continuity.ts` (`ContinuityDecisionInput`, head of `decideFromBinding`, removed failover block).
+- LOW: `session-stream.ts` `decideNativeContinuity` call site; the flipped test files.
+
+## 2026-09-07 - Reattach restart bindings across prompt/toolset drift; date-line normalization survives trailing appends
+
+### What changed
+
+- `session-continuity.ts`: `identityDrift` now reports `system_prompt_changed` / `toolset_changed` instead of the bare `options_changed`. `decideFromBinding` flattens only on `account_changed` / `model_changed`; prompt/toolset drift falls through to the normal prefix checks and a matching prefix reattaches with the drift reason (divergence reasons still win). The live-entry path is unchanged structurally and simply surfaces the split reasons.
+- `session-sync.ts`: `GENERATED_DATE_LINE` no longer anchors the `Current working directory:` line to end-of-string, so the date/cwd pair is neutralized wherever it sits in the prompt.
+- Tests: `claude-sdk-oauth-restart-binding-drift.test.ts` (new) pins the restart contract and midnight stability with trailing appends; `claude-sdk-oauth-fingerprint.test.ts`, `claude-sdk-oauth-restored-security.test.ts`, `claude-sdk-oauth-continuity-decision.test.ts`, `claude-sdk-oauth-session-registry-wiring.test.ts` expectations moved from `options_changed` / `flatten` to the split reasons / `reattach`.
+
+### Why
+
+- oh-my-openagent#7884: a plain `omo --session <id>` resume after a restart printed `Session continuity lost - resent the full conversation (options_changed) - sent 485.5KB`. Two defects compounded: (1) a restart binding flattened on any fingerprint drift, while the live path reattaches on the same drift; (2) the date-line normalization required the cwd line to be the last line of the prompt, but a real prompt carries hundreds of lines of extension appends (`<Task_Management>`, bash timeout policy, terminal prompt, memory) after it, so `systemPromptHash` drifted at every UTC midnight and every restart-resume across a midnight or an engine/prompt upgrade re-sent the whole conversation.
+- A restart has no live query: the resume builds a fresh `query()` carrying the CURRENT options and hooks, so the 2026-09-0x note that a `HOST_TOOL_POLICY_FINGERPRINT` bump "cold-seeds once" on the first admission after upgrade is superseded - the bump now reattaches with `toolset_changed`, and resident sessions still re-fingerprint through the live path as before. Account/model drift keeps failing closed because those are lineage identity, not per-query options.
+- The split reasons answer the issue's request to see WHICH option group changed: `session.log` continuity events now carry `system_prompt_changed` or `toolset_changed`. `options_changed` stays in the sanitized vocabulary for historical log lines but is no longer emitted.
+
+### Why an extension could not handle it
+
+- The continuity decision table, the persisted binding admission, and the fingerprint digest are private to this builtin provider; no extension hook observes the restart binding or the hash inputs.
+
+### Expected merge conflict zones
+
+- MEDIUM: `session-continuity.ts` `identityDrift` and the head of `decideFromBinding` (drift gate + reattach reasons).
+- LOW: `session-sync.ts` `GENERATED_DATE_LINE` regex and its docblock; the four updated test files around `options_changed` expectations.
+
 ## 2026-09-06 - Preserve early terminal results during turn claim
 
 ### What changed

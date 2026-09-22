@@ -29,6 +29,8 @@ import { resolveOpenAIClientAuth } from "./openai-client-auth.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
 import { buildBaseOptions, clampMaxForOpenAI, OPENAI_RESPONSES_RESERVED_BODY_KEYS } from "./simple-options.ts";
+import { startWebSocketLiveness } from "./websocket-liveness.ts";
+import { createWebSocketTransportFailure } from "./websocket-transport-failure.ts";
 
 const OPENAI_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode"]);
 const OPENAI_BETA_RESPONSES_WEBSOCKETS = "responses_websockets=2026-02-06";
@@ -37,10 +39,11 @@ const SESSION_WEBSOCKET_CACHE_TTL_MS = 5 * 60 * 1000;
 // OpenAI Responses rejects max_output_tokens below 16: https://github.com/earendil-works/pi/issues/6265
 const OPENAI_RESPONSES_MIN_OUTPUT_TOKENS = 16;
 
-type WebSocketEventType = "open" | "message" | "error" | "close";
+type WebSocketEventType = "open" | "message" | "error" | "close" | "ping" | "pong";
 type WebSocketListener = (event: unknown) => void;
 
 interface WebSocketLike {
+	ping?(data?: string): void;
 	close(code?: number, reason?: string): void;
 	send(data: string): void;
 	addEventListener(type: WebSocketEventType, listener: WebSocketListener): void;
@@ -59,7 +62,7 @@ type WebSocketConstructor = new (
 ) => WebSocketLike;
 
 type MutableResponsesPayload = ResponseCreateParamsStreaming & {
-	prompt_cache_options?: { mode?: "explicit" | "implicit" };
+	prompt_cache_options?: { mode?: "explicit" | "implicit"; ttl?: "30m" };
 };
 
 const websocketSessionCache = new Map<string, CachedWebSocketConnection>();
@@ -114,7 +117,19 @@ function getPromptCacheRetention(
 	compat: Required<OpenAIResponsesCompat>,
 	cacheRetention: CacheRetention,
 ): "24h" | undefined {
-	return cacheRetention === "long" && compat.supportsLongCacheRetention ? "24h" : undefined;
+	return cacheRetention === "long" && compat.supportsLongCacheRetention && !compat.supportsExplicitPromptCacheMode
+		? "24h"
+		: undefined;
+}
+
+function getPromptCacheOptions(
+	compat: Required<OpenAIResponsesCompat>,
+	cacheRetention: CacheRetention,
+): { mode?: "explicit"; ttl?: "30m" } | undefined {
+	if (!compat.supportsExplicitPromptCacheMode) return undefined;
+	if (cacheRetention === "none") return { mode: "explicit" };
+	if (cacheRetention === "long" && compat.supportsLongCacheRetention) return { ttl: "30m" };
+	return undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -340,6 +355,7 @@ export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOption
 	const base = {
 		...buildBaseOptions(model, context, options, options?.apiKey),
 		toolChoice: options?.toolChoice,
+		serviceTier: options?.serviceTier,
 	} satisfies OpenAIResponsesOptions;
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
 	const reasoningEffort =
@@ -435,14 +451,13 @@ function buildParams(
 	});
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention ?? model.cacheRetention, options?.env);
-	const disableImplicitPromptCache = cacheRetention === "none" && compat.supportsExplicitPromptCacheMode;
 	const params: MutableResponsesPayload = {
 		model: model.id,
 		input: messages,
 		stream: true,
 		prompt_cache_key: cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
 		prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention),
-		prompt_cache_options: disableImplicitPromptCache ? { mode: "explicit" } : undefined,
+		prompt_cache_options: getPromptCacheOptions(compat, cacheRetention),
 		store: false,
 	};
 
@@ -577,6 +592,7 @@ async function connectWebSocket(url: string, headers: Headers, signal?: AbortSig
 		let socket: WebSocketLike;
 
 		const cleanup = () => {
+			transportFailure.dispose();
 			socket.removeEventListener("open", onOpen);
 			socket.removeEventListener("error", onError);
 			socket.removeEventListener("close", onClose);
@@ -588,6 +604,7 @@ async function connectWebSocket(url: string, headers: Headers, signal?: AbortSig
 			cleanup();
 			reject(error);
 		};
+		const transportFailure = createWebSocketTransportFailure(settleReject);
 		const onOpen: WebSocketListener = () => {
 			if (settled) return;
 			settled = true;
@@ -595,10 +612,10 @@ async function connectWebSocket(url: string, headers: Headers, signal?: AbortSig
 			resolve(socket);
 		};
 		const onError: WebSocketListener = (event) => {
-			settleReject(extractWebSocketError(event));
+			transportFailure.onError(event);
 		};
 		const onClose: WebSocketListener = (event) => {
-			settleReject(extractWebSocketCloseError(event));
+			transportFailure.onClose(event);
 		};
 		const onAbort = () => {
 			if (settled) return;
@@ -680,27 +697,6 @@ async function acquireWebSocket(
 	};
 }
 
-function extractWebSocketError(event: unknown): Error {
-	if (event && typeof event === "object" && "message" in event) {
-		const message = (event as { message?: string }).message;
-		if (typeof message === "string" && message.length > 0) {
-			return new Error(message);
-		}
-	}
-	return new Error("WebSocket error");
-}
-
-function extractWebSocketCloseError(event: unknown): Error {
-	if (event && typeof event === "object") {
-		const code = "code" in event ? (event as { code?: number }).code : undefined;
-		const reason = "reason" in event ? (event as { reason?: string }).reason : undefined;
-		const codeText = typeof code === "number" ? ` ${code}` : "";
-		const reasonText = typeof reason === "string" && reason.length > 0 ? ` ${reason}` : "";
-		return new Error(`WebSocket closed${codeText}${reasonText}`.trim());
-	}
-	return new Error("WebSocket closed");
-}
-
 async function decodeWebSocketData(data: unknown): Promise<string | null> {
 	if (typeof data === "string") return data;
 	if (data instanceof ArrayBuffer) {
@@ -729,7 +725,14 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 		pending = null;
 		resolve();
 	};
+	const liveness = startWebSocketLiveness(socket, (error) => {
+		failed = error;
+		done = true;
+		closeWebSocketSilently(socket, 1000, "liveness_timeout");
+		wake();
+	});
 	const onMessage: WebSocketListener = (event) => {
+		liveness.noteActivity();
 		void (async () => {
 			if (!event || typeof event !== "object" || !("data" in event)) return;
 			const text = await decodeWebSocketData((event as { data?: unknown }).data);
@@ -745,17 +748,22 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 			} catch {}
 		})();
 	};
-	const onError: WebSocketListener = (event) => {
-		failed = extractWebSocketError(event);
+	const transportFailure = createWebSocketTransportFailure((error) => {
+		if (!failed) failed = error;
 		done = true;
 		wake();
+	});
+	const onError: WebSocketListener = (event) => {
+		transportFailure.onError(event);
 	};
 	const onClose: WebSocketListener = (event) => {
-		if (!sawCompletion && !failed) {
-			failed = extractWebSocketCloseError(event);
+		if (sawCompletion) {
+			transportFailure.dispose();
+			done = true;
+			wake();
+			return;
 		}
-		done = true;
-		wake();
+		transportFailure.onClose(event);
 	};
 	const onAbort = () => {
 		failed = new Error("Request was aborted");
@@ -783,6 +791,8 @@ async function* parseWebSocket(socket: WebSocketLike, signal?: AbortSignal): Asy
 		if (failed) throw failed;
 		if (!sawCompletion) throw new Error("WebSocket stream closed before response.completed");
 	} finally {
+		liveness.stop();
+		transportFailure.dispose();
 		socket.removeEventListener("message", onMessage);
 		socket.removeEventListener("error", onError);
 		socket.removeEventListener("close", onClose);

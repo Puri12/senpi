@@ -103,6 +103,7 @@ type OpenAICompletionsRequestParams = Omit<
 	reasoning_effort?: string;
 	provider?: OpenAICompletionsCompat["openRouterRouting"];
 	providerOptions?: { gateway: Record<string, string[]> };
+	venice_parameters?: OpenAICompletionsCompat["veniceParameters"];
 	session_id?: string;
 };
 
@@ -1254,6 +1255,12 @@ function buildParams(
 	// OpenRouter provider routing preferences
 	if (model.compat?.openRouterRouting) {
 		params.provider = model.compat.openRouterRouting;
+	}
+
+	// Venice request options. Venice's schema is `additionalProperties: false`, so
+	// this is the only sanctioned place to shape the object.
+	if (model.compat?.veniceParameters) {
+		params.venice_parameters = model.compat.veniceParameters;
 	}
 
 	// Vercel AI Gateway provider routing preferences

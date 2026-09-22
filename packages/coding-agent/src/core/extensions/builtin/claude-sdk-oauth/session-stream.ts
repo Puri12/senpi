@@ -13,7 +13,7 @@ import {
 	sanitizeTerminalFailure,
 	stageContinuityDecision,
 } from "./session-observability.ts";
-import { bindingFromEntry, getBinding, reattachSession } from "./session-reattach.ts";
+import { bindingFromEntry, bindingInvalidationReason, getBinding, reattachSession } from "./session-reattach.ts";
 import {
 	type ClaudeSdkOauthSessionEntry,
 	closeSession,
@@ -57,6 +57,10 @@ const OBSERVED_KIND: Record<ContinuityDecision["kind"], "incremental" | "resume"
 	bootstrap: "cold-seed",
 };
 
+function contextHasPriorAssistantMessage(context: Context): boolean {
+	return context.messages.some((message) => message.role === "assistant");
+}
+
 function entrySnapshot(entry: ClaudeSdkOauthSessionEntry, hashes: readonly string[]) {
 	return {
 		sdkSessionId: entry.sdkSessionId,
@@ -92,9 +96,12 @@ async function createResidentAttempt(
 		modelId: input.model.id,
 		fingerprint,
 		transcriptAvailable,
+		crossAccountResumeSupported: auth.authLane !== "config-dir",
 		idleExpired: existing ? isIdleExpired(existing) : false,
+		invalidationReason: bindingInvalidationReason(sessionId),
 	});
-	const firstTurn = existing === undefined && getBinding(sessionId) === undefined && hashes.length <= 1;
+	const firstTurn =
+		existing === undefined && getBinding(sessionId) === undefined && !contextHasPriorAssistantMessage(input.context);
 	let observedReason =
 		"reason" in decision ? decision.reason : decision.kind === "bootstrap" ? "registry_miss" : undefined;
 	let observedKind: "incremental" | "resume" | "cold-seed" = OBSERVED_KIND[decision.kind];

@@ -9,10 +9,16 @@ vi.mock("node:child_process", async (importOriginal) => {
 	return { ...actual, spawn: vi.fn() };
 });
 
-import { probeAmbientClaudeAuthStatus } from "../src/core/extensions/builtin/claude-sdk-oauth/availability.ts";
+import {
+	describeClaudeLane,
+	probeAmbientClaudeAuthStatus,
+} from "../src/core/extensions/builtin/claude-sdk-oauth/availability.ts";
+import {
+	overrideExecutableDeps,
+	resetExecutableDeps,
+} from "../src/core/extensions/builtin/claude-sdk-oauth/executable.ts";
 
-const executable = "C:/fixture/claude.exe";
-const previousExecutable = process.env.CLAUDE_CODE_EXECUTABLE;
+const executable = "/fixture/claude";
 
 function fakeChild(outcome: 0 | 1 | "error"): ChildProcess {
 	const child = new EventEmitter() as unknown as ChildProcess;
@@ -28,15 +34,16 @@ function fakeChild(outcome: 0 | 1 | "error"): ChildProcess {
 
 beforeEach(() => {
 	spawnMock.mockReset();
-	process.env.CLAUDE_CODE_EXECUTABLE = executable;
+	overrideExecutableDeps({
+		platform: "darwin",
+		arch: "arm64",
+		env: (name) => (name === "CLAUDE_CODE_EXECUTABLE" ? executable : undefined),
+		isFile: (path) => path === executable,
+	});
 });
 
 afterEach(() => {
-	if (previousExecutable === undefined) {
-		delete process.env.CLAUDE_CODE_EXECUTABLE;
-		return;
-	}
-	process.env.CLAUDE_CODE_EXECUTABLE = previousExecutable;
+	resetExecutableDeps();
 });
 
 describe("readAmbientClaudeAuthStatus", () => {
@@ -60,5 +67,33 @@ describe("readAmbientClaudeAuthStatus", () => {
 	it("returns false when the probe cannot spawn", async () => {
 		spawnMock.mockReturnValue(fakeChild("error"));
 		await expect(probeAmbientClaudeAuthStatus()).resolves.toBe(false);
+	});
+
+	// #1541: the probe shares the validating resolver, so a path this process cannot stat is never spawned.
+	it("returns false without spawning when no candidate is a file", async () => {
+		overrideExecutableDeps({ isFile: () => false });
+		await expect(probeAmbientClaudeAuthStatus()).resolves.toBe(false);
+		expect(spawnMock).not.toHaveBeenCalled();
+	});
+});
+
+describe("describeClaudeLane", () => {
+	it("reports the same validated executable the query path uses and the host runtime", () => {
+		expect(describeClaudeLane()).toEqual({
+			runtime: process.versions.bun === undefined ? "node" : "bun",
+			executable,
+			tried: [executable],
+		});
+	});
+
+	it("reports every candidate tried when nothing is spawnable", () => {
+		overrideExecutableDeps({ isFile: () => false, resolve: (spec) => `/resolved/${spec}` });
+		const lane = describeClaudeLane();
+		expect(lane.executable).toBeUndefined();
+		expect(lane.tried).toEqual([
+			executable,
+			"/resolved/@anthropic-ai/claude-agent-sdk-darwin-arm64/claude",
+			"claude on PATH (PATH is unset)",
+		]);
 	});
 });

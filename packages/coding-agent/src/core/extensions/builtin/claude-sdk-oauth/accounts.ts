@@ -1,7 +1,9 @@
 import type { Credential, CredentialStore, OAuthCredential } from "@earendil-works/pi-ai";
 
 export type AccountSlot = {
+	/** Immutable operational identity, including SDK session bindings. */
 	name: string;
+	displayName?: string;
 	refresh: string;
 	access: string;
 	expires: number;
@@ -32,11 +34,21 @@ function storedSlots(credential: ClaudeSdkOauthCredential): AccountSlot[] {
 	return credential.accounts ?? [];
 }
 
+/**
+ * A stored account whose material is the managed sentinel holds no token at
+ * all: it was written by a build that stored this credential's own flat
+ * projection as a generated `login-N` slot. Selecting it fails the provider's
+ * auth check and dead-ends the request, so it is never listed as an account.
+ */
+export function isSentinelSlot(slot: Pick<AccountSlot, "access" | "refresh">): boolean {
+	return slot.access === SENTINEL_OAUTH_FIELDS.access && slot.refresh === SENTINEL_OAUTH_FIELDS.refresh;
+}
+
 export function listAccounts(
 	credential: ClaudeSdkOauthCredential,
 	env?: (name: string) => string | undefined,
 ): AccountSlot[] {
-	const slots = [...storedSlots(credential)];
+	const slots = storedSlots(credential).filter((slot) => !isSentinelSlot(slot));
 	if (env) {
 		const state = credential.slotState ?? {};
 		for (const slot of envSlots(env)) {
@@ -63,6 +75,29 @@ export function addAccount(credential: ClaudeSdkOauthCredential, slot: AccountSl
 		throw new Error(`Account '${slot.name}' already exists`);
 	}
 	return { ...credential, accounts: [...storedSlots(credential), slot] };
+}
+
+/**
+ * Re-login recovery (omo#7084): a same-name slot is replaced in place — fresh
+ * token material and source, block stamps cleared, displayName preserved — so
+ * a successful login lifts the slot's `auth_error` lock. Unknown names append.
+ */
+export function upsertAccount(credential: ClaudeSdkOauthCredential, slot: AccountSlot): ClaudeSdkOauthCredential {
+	assertValidAccountName(slot.name);
+	const existing = storedSlots(credential).find((candidate) => candidate.name === slot.name);
+	if (!existing) return { ...credential, accounts: [...storedSlots(credential), slot] };
+	const { blockedUntil: _blockedUntil, blockReason: _blockReason, ...identity } = existing;
+	const refreshed: AccountSlot = {
+		...identity,
+		access: slot.access,
+		refresh: slot.refresh,
+		expires: slot.expires,
+		source: slot.source,
+	};
+	return {
+		...credential,
+		accounts: storedSlots(credential).map((candidate) => (candidate.name === slot.name ? refreshed : candidate)),
+	};
 }
 
 export function removeAccount(credential: ClaudeSdkOauthCredential, name: string): ClaudeSdkOauthCredential {

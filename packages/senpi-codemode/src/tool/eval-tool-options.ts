@@ -11,6 +11,7 @@ import type {
 	EnabledEvalLanguages,
 	EvalInputSchema,
 	EvalKernelManager,
+	EvalResultDetails,
 	EvalRuntimes,
 	EvalToolDetails,
 	EvalToolInput,
@@ -20,15 +21,21 @@ import type {
 export interface CreateEvalToolOptions {
 	readonly enabledLanguages: EnabledEvalLanguages;
 	readonly kernelManager: EvalKernelManager;
+	/** Idle time an interactive (detach-behavior) call blocks the agent loop before the cell detaches. */
 	readonly cellTimeoutSeconds: number;
 	/**
-	 * Longest an interactive (detach-behavior) call blocks the agent loop before the cell detaches,
-	 * capping the `timeout` detach budget. Defaults to {@link DEFAULT_FOREGROUND_WINDOW_SECONDS}.
-	 * Does not affect `on_timeout: "error"` calls or the wall-clock hard limit.
+	 * Caps `cellTimeoutSeconds` and the bridge-parked grace for interactive calls. Defaults to
+	 * {@link DEFAULT_FOREGROUND_WINDOW_SECONDS}. Does not affect the kill deadlines.
 	 */
 	readonly foregroundWindowSeconds?: number;
 	/** Wall-clock kill deadline applied to every cell; only used when this factory creates its own manager. */
 	readonly hardLimitSeconds?: number;
+	/**
+	 * Kill deadline for a cell's own execution time (host tool calls excluded); a per-call `timeout`
+	 * replaces it. Rendered into the tool schema and description; also seeds a self-created manager.
+	 */
+	readonly runBudgetSeconds?: number;
+	readonly maxDetachedCells?: number;
 	readonly executeTool: ExecuteTool;
 	readonly listTools?: () => readonly EvalSchemaToolInfo[];
 	readonly complete?: (request: CompletionRequest, ctx: ExtensionContext) => Promise<CompletionResult>;
@@ -40,7 +47,7 @@ export interface CreateEvalToolOptions {
 	readonly onCellSettled?: (payload: EvalExecutionEventPayload) => void;
 	readonly timeoutFactory?: EvalTimeoutFactory;
 	readonly proxyExecutor?: (params: EvalToolInput, signal?: AbortSignal) => Promise<AgentToolResult<EvalToolDetails>>;
-	readonly renderers?: Pick<ToolDefinition<EvalInputSchema, EvalToolDetails>, "renderCall" | "renderResult">;
+	readonly renderers?: Pick<ToolDefinition<EvalInputSchema, EvalResultDetails>, "renderCall" | "renderResult">;
 	readonly spawns?: boolean;
 	/** Whether the session registry exposes the monitor tool through eval. */
 	readonly monitor?: boolean;

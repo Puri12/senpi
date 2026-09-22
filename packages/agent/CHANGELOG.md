@@ -12,6 +12,444 @@
 
 ### Removed
 
+## [2026.9.22] - 2026-09-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.21-2] - 2026-09-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+- Updated the test runner to Vitest 5.0.1 and V8 coverage to @vitest/coverage-v8 5.0.1, and migrated session timing benchmarks to the new benchmark API. ([#1895](https://github.com/code-yeongyu/senpi/issues/1895))
+
+### Fixed
+
+### Removed
+
+## [2026.9.21] - 2026-09-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+- Updated the bundled dependencies: typebox 1.3.27 -> 1.3.34, ignore 7.0.8 -> 7.0.9 and yaml 2.9.0 -> 2.9.1. ([#1895](https://github.com/code-yeongyu/senpi/issues/1895))
+
+### Fixed
+
+### Removed
+
+## [2026.9.20] - 2026-09-20
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.19-2] - 2026-09-19
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.19] - 2026-09-19
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-6] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-5] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-4] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-3] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-2] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17-4] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17-3] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17-2] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.16-3] - 2026-09-16
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.16-2] - 2026-09-16
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.16] - 2026-09-16
+
+### Breaking Changes
+
+### Added
+
+- Added structural read folders and a segmented read view, exported as `selectedReadFolder`, `createDefaultReadSummary`, `createSegmentedReadView` and the `ReadFolder` type. A folder is a pure, synchronous lexer over TS/JS/JSON that marks foldable interiors (bodies of four or more lines, comments of six or more) and refuses any fold that overlaps a declaration header: class heritage, decorators, parameter lists, return types, arrow-return object types, computed member names, destructuring targets and nested declaration headers stay visible, and class bodies made only of fields, static blocks or accessors are never folded. Ambiguous lexical input (unproved type-operator or angle syntax, unclosed literals, unicode-set regexes) yields `parse_failure` instead of a partial fold. The view keeps exact source slices, inserts an ellipsis line per elision and lists numeric `offset`/`limit` rereads in its footer; it unfolds breadth-first until 50 source lines are visible and returns `no_summary` for inputs under 100 lines, oversized skeletons or views with no byte saving. No parser runtime, WASM or subprocess is added ([#1639](https://github.com/code-yeongyu/senpi/issues/1639)).
+
+### Changed
+
+- Default `read` calls on eligible `.json` files now return the structural view. TypeScript and JavaScript stay raw: the measured candidate missed the required median saving for both, so only JSON is selected in the frozen `READ_FOLDER_SELECTION`. Explicit `offset`/`limit` requests, truncated input, markdown and `.txt` keep the verbatim path. `createReadTool()` with no options uses `selectedReadFolder`; passing an options object without `folder` reads raw, and a custom folder can be injected. The tool also honors an abort that arrives while the file bytes are being read ([#1639](https://github.com/code-yeongyu/senpi/issues/1639)).
+
+### Fixed
+
+- The empty-assistant recovery wrapper (`withEmptyAssistantRecovery`) no longer withholds a wrapped model's thinking until its first visible text or tool call. The attempt now starts forwarding on the first meaningful content event (a non-blank `thinking_delta`, a visible `text_delta`, `toolcall_start`, or a `text_end`/`thinking_end` with content), so reasoning streams live and the assistant `message_start` reaches subscribers when the provider's `start` event does. The Kimi XTML lane is the one exception: its thinking channel is where misrouted text tool calls land and `recoverKimiXtmlThinking` only rewrites the finished message, so a leaked protocol fragment forwarded live could not be retracted; that lane keeps the buffered contract. An attempt that never forwarded anything keeps the existing silent retry and bounded "twice" errors. An attempt that had already forwarded reasoning and then stopped empty (or reported `tool_use` without a tool call) is no longer replayed inside the stream; it ends as a retryable `error` that keeps the streamed content and carries the `empty_assistant_response_recovery` / `empty_tool_use_response_recovery` diagnostic with `{ retries: 0, forwarded: true }`, and the session's turn retry re-requests it ([#1733](https://github.com/code-yeongyu/senpi/issues/1733)).
+
+### Removed
+
+## [2026.9.15-2] - 2026-09-15
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.15] - 2026-09-15
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.13-2] - 2026-09-13
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- `convertToLlm` still drops failed assistant turns, but `dropFailedAssistantTurns` is imported from `@earendil-works/pi-ai/utils/drop-failed-assistant-turns` so the `./harness/session` entry stays off the AI barrel.
+
+### Removed
+
+## [2026.9.13] - 2026-09-13
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.12-3] - 2026-09-12
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+- Removed the withdrawn manual-drive configuration, action inspection methods, action outcomes, and snapshot action field from `AgentHarness`; the harness now runs on upstream's runtime/drive generation.
+
+## [2026.9.12-2] - 2026-09-12
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.12] - 2026-09-12
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.11] - 2026-09-11
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.10-2] - 2026-09-10
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.10] - 2026-09-10
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- A tool result returned with `isError: true` is now treated as a tool error: `tool_execution_end.isError` and the `toolResult` message carry the flag while `content` and `details` stay intact, so structured failures (team, memory, terminal tools) render and report as failures instead of successes. `AgentToolResult` declares the optional `isError` field.
+
+### Removed
+
+## [2026.9.9-2] - 2026-09-09
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.9] - 2026-09-09
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.8] - 2026-09-08
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Recover a provider response that reports the `tool_use` stop reason while carrying no tool-call block. The turn is retried once on models that already use stream recovery, and the contradictory terminal state is demoted to a coherent stop for every model, so a lost tool call no longer ends the turn silently.
+
+### Removed
+
+## [2026.9.7-2] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.7] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.6] - 2026-09-06
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
 ## [2026.9.5-3] - 2026-09-05
 
 ### Breaking Changes

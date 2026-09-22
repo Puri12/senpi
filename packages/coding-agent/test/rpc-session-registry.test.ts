@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { getApiProvider, registerApiProvider } from "@earendil-works/pi-ai/compat";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
@@ -22,6 +23,26 @@ const profile = (cwd: string, sessionPath: string): RpcSessionLaunchProfile => (
 	creationModel: { provider: "test", modelId: "model" },
 	initialThinkingLevel: "high",
 });
+
+function assistantReply(): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "noted" }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-opus-4-6",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 2,
+	};
+}
 
 function runtime(
 	options: Parameters<CreateAgentSessionRuntimeFactory>[0],
@@ -78,6 +99,34 @@ describe("RPC session registry", () => {
 		expect(first.sessionId).not.toBe(second.sessionId);
 		expect(first.durableSessionId).not.toBe(second.durableSessionId);
 		expect(registry.list()).toHaveLength(2);
+	});
+
+	test("starts an existing session file with a resume reason and a fresh one without", async () => {
+		const dir = await mkdtemp(join(tmpdir(), "senpi-rpc-registry-"));
+		directories.push(dir);
+		const reasons: Array<string | undefined> = [];
+		const registry = new RpcSessionRegistry({
+			agentDir: dir,
+			createRuntime: async (options) => {
+				reasons.push(options.sessionStartEvent?.reason);
+				return runtime(options);
+			},
+		});
+		const existing = SessionManager.create(dir, join(dir, "sessions"));
+		existing.appendMessage({ role: "user", content: "which database?", timestamp: 1 });
+		// A session file is only materialized once an assistant message lands, and
+		// "already on disk" is exactly what makes the next open a resume.
+		existing.appendMessage(assistantReply());
+		const existingPath = existing.getSessionFile();
+		if (existingPath === undefined) throw new Error("expected a persisted session file");
+		expect(existsSync(existingPath)).toBe(true);
+
+		await registry.openSession(profile(dir, join(dir, "fresh.jsonl")));
+		await registry.openSession(profile(dir, existingPath));
+
+		// Re-opening a session file over RPC is a resume, exactly like interactive
+		// /resume: extensions that only rebuild state on "resume" must see it.
+		expect(reasons).toEqual([undefined, "resume"]);
 	});
 
 	test("reserves a canonical path before asynchronous runtime construction", async () => {

@@ -1,5 +1,28 @@
 # TTSR Fork Tracker
 
+## 2026-09-16 - Near-duplicate paragraph frequency
+
+### What changed and why
+
+- Added `detectors/collapse-near-duplicates.ts` (`near-duplicate-paragraphs`), wired last in the collapse chain for text and thinking streams. `paragraph-repeat` compares paragraphs byte for byte, so a model that restates the same step in different words every time never reaches three identical hashes; a captured incident streamed such a loop for 12 minutes with zero tool calls until the user killed the session.
+- The mechanism is a frequency rule, not a pair rule: a paragraph is an echo when its normalized word set reaches 0.5 Jaccard against any of the last 32 eligible paragraphs, and the detector only fires when at least 8 of the last 12 eligible paragraphs are echoes. A couple of similar paragraphs, a callback to an earlier point, or a summary that repeats a sentence never reaches that density.
+- The exact-repeat ring (64 paragraphs) also cannot see a cycle longer than itself. The incident's cycle was 114 paragraphs, so the same loop stayed invisible even where it repeated verbatim; the frequency rule is independent of cycle length.
+- Paragraphs inside fenced code blocks are skipped and never enter the history: repeated code blocks in one message are legitimate.
+- Remediation reuses the existing collapse path: abort, truncate from the first echoed paragraph in the firing window (its anchor is kept), then the collapse nudge.
+- Calibration is measured, not assumed. Replaying the shipped detector over 12,499 real assistant text and thinking parts (28.9 MB) from the local session store fires twice, and both firings are known runaway generations from one 2026-09-03 session; there are no other matches.
+
+### Why an extension-local change is required
+
+- The stream watcher already owns per-message detector state and collapse remediation, so paragraph tracking belongs in the extension-local collapse chain without changing provider or core stream contracts.
+
+### Coverage and expected conflict zones
+
+- `test/ttsr/detector-collapse-near-duplicates.test.ts` replays the sanitized incident fixture (`fixtures/incident-near-duplicate-narration.txt`), pins chunk-boundary independence, and pins the negatives: distinct multi-sentence prose, a minority of echoes in the window, the long healthy prefix, fenced code, and tool-stream exclusion.
+- `test/ttsr/collapse-test-inputs.ts` `buildHealthyPrefix` now composes varied vocabulary. Its previous sentences differed only by a counter, so every paragraph normalized to the same token set - healthy prose for a byte-exact rule, a narration loop for a normalized one.
+- `test/ttsr/detector-collapse-paragraphs.test.ts` `narration()` now emits seven lexically distinct steps instead of one template plus a counter, so the exact-repeat assertions still test exact repetition. The assertions themselves are unchanged.
+- Real-CLI QA ships as `senpi-qa` mock-loop scenario `ttsr-near-duplicate-loop`: fifteen paraphrases of one action, none byte-identical, streamed from the local fake model server. It asserts the abort, the truncated persisted message, the `collapse-repetition` interrupt in the recovery request, and the recovered answer.
+- LOW: `detectors/collapse.ts` (one chain entry) and the two test-input fixtures; no existing detector thresholds are changed.
+
 ## 2026-09-03 - Within-message paragraph repetition
 
 ### What changed and why

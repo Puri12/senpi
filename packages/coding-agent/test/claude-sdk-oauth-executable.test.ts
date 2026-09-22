@@ -13,6 +13,7 @@ function makeDeps(overrides: Partial<ExecutableDeps>): ExecutableDeps {
 		resolve: () => {
 			throw new Error("not found");
 		},
+		isFile: () => true,
 		...overrides,
 	};
 }

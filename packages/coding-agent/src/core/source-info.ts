@@ -1,6 +1,10 @@
 import type { PathMetadata } from "./package-manager.ts";
 
-export type SourceScope = "user" | "project" | "temporary";
+/**
+ * Where a resource comes from. `system` marks resources the harness itself provides: builtin and bundled
+ * extensions, command-line packages whose manifest declares `pi.system`, and what those contribute.
+ */
+export type SourceScope = "user" | "project" | "temporary" | "system";
 export type SourceOrigin = "package" | "top-level";
 
 export interface SourceInfo {

@@ -1,4 +1,256 @@
+## 2026-09-16 - Grammar-backed fold boundaries for structural reads (senpi#1685)
 
+### What changed
+
+- `packages/agent/src/harness/utils/read-folders/tree-sitter/syntax.ts`: a pure fold rule over a parsed syntax tree. It mirrors the compiler oracle's whitelist - block, module, switch, object and array interiors plus non-documentation comments - and protects parameter lists, heritage clauses, decorators, import declarations, binding patterns, computed member names, destructuring assignment targets, type annotations, `as`/`satisfies` operands and every declaration line through the line that opens its body. Any candidate overlapping a protected interval is dropped.
+- `packages/agent/src/harness/utils/read-folders/tree-sitter/engine.ts`: loads one grammar per language on first use, parses inside a 250 ms budget, and returns the injected fallback folder's own result when the grammar is absent, the tree has an error or the budget is exhausted.
+- `packages/agent/src/harness/utils/read-folders/tree-sitter/grammar-assets.ts`: resolves the vendored grammar and runtime artifacts from the package, the compiled binary's embedded assets, or the pinned measurement dependency, in that order.
+- `packages/agent/src/harness/utils/read-folders/compose.ts`: the hierarchy and scan-to-result composition both engines share, lifted out of `packages/agent/src/harness/utils/read-folders/index.ts`.
+- `packages/agent/src/harness/utils/read-folders/prepare.ts`: resolves the folder a default read must use for a path; only a language the frozen selection binds to `wasm` loads a grammar.
+- `packages/agent/src/harness/utils/read-folders/index.ts`: the frozen selection now names `wasm` for `.js` with the measured raw reasons for TypeScript and TSX, and `isReadSummaryPath` accepts a `wasm` selection.
+- `packages/agent/src/harness/tools/read.ts`: awaits the prepared folder before composing the default summary.
+- `packages/agent/src/index.ts` and `packages/agent/src/runtime-assets.d.ts`: export the prepare seam and declare the packaged WebAssembly asset imports.
+
+### Why
+
+- After #1644 the dependency-free scan qualified only for JSON; TypeScript and JavaScript were frozen raw pending the owner's WASM decision. #1685 answered it, and the re-run bake-off measures both engines per language under the same oracle, threshold rule and frozen-selection mechanism: JavaScript reaches a 41.93% median token saving against its 35.54% bar (heuristic: 0%), while TypeScript and TSX stay raw because the minimum oracle skeleton of most of their files exceeds the view's 100 visible-line budget.
+
+### Why an extension could not handle it
+
+- The read tool's default output and its frozen per-language selection are decided inside the agent package before any extension hook observes the read; an extension cannot change which folder the tool composes, nor bind an engine to the measurement receipt.
+
+### Expected merge conflict zones
+
+- LOW: the `READ_FOLDER_SELECTION` literal and the `fold` switch in `packages/agent/src/harness/utils/read-folders/index.ts`, which the fork already owns.
+- LOW: the summary call site in `packages/agent/src/harness/tools/read.ts`, now preceded by an awaited folder resolution.
+
+## 2026-09-16 - Fork-local rate guard withdrawn; the loop bounds silence only (senpi#1759)
+
+### What changed
+
+- `packages/agent/src/agent-loop.ts`: the assistant event reader no longer measures how fast a live stream delivers, and no longer aborts the request controller on a rate verdict. It is back to the two silence bounds - the stream-start bound until the first event, and the inter-event idle bound.
+- `packages/agent/src/types.ts`: the loop-config option that carried the rate thresholds is removed.
+- `packages/agent/src/agent.ts`: the matching runtime option, its public field and its forwarding into every loop config are removed.
+- `packages/agent/src/index.ts`: the exports that published that module's surface are removed, and the module itself is deleted.
+
+### Why
+
+- The guard failed healthy turns: a normal stream measured just under the shipped floor had its request aborted mid tool call, and thinking-heavy models and gateways that batch several tokens into one delta routinely stay under it. Aborting the controller also discarded the partial answer instead of delivering it slowly. It is withdrawn rather than retuned, so these files match their pre-guard shape again.
+
+### Why an extension could not handle it
+
+- The bound lived inside the agent loop's stream reader, which no extension can observe or replace; removing it likewise has to happen here.
+
+### Expected merge conflict zones
+
+- LOW: `createAssistantEventReader` / `readNextAssistantEvent` in `packages/agent/src/agent-loop.ts` are back to the upstream shape, so an upstream edit to the start or idle bounds now applies cleanly.
+
+## 2026-09-16 - Forward thinking live in the empty-assistant recovery wrapper (#1733)
+
+### What changed
+
+- `packages/agent/src/empty-assistant-recovery.ts` commits an attempt (starts forwarding) on the first meaningful content event: non-blank `thinking_delta`, visible `text_delta`, `toolcall_start`, or a `text_end`/`thinking_end` carrying content. Previously only `toolcall_start` and visible `text_delta` committed, so a reasoning model's whole thinking phase was buffered.
+- `CommitPolicy.thinkingCommits` is false for the Kimi XTML lane (`hasKimiTextToolCallRecovery`): that thinking channel is the documented misrouting vector for text tool calls, and `wrapStreamWithKimiThinkingRecovery` forwards deltas untouched and only rewrites the finished message, so streaming it live would expose protocol fragments the recovery later removes (the #759 production incident). Kimi keeps the buffered contract until the thinking recovery sanitizes deltas and partials as they stream.
+- A committed attempt that ends as an empty stop or a `tool_use` stop without a tool call is not retried inside the wrapper. It ends as a `stopReason: "error"` message with `FORWARDED_EMPTY_RESPONSE_ERROR` / `FORWARDED_EMPTY_TOOL_USE_ERROR` (defined in pi-ai `utils/empty-response-errors.ts`), the streamed content preserved, and a `{ retries: 0, forwarded: true }` recovery diagnostic. pi-ai's retry classifier treats those two texts as retryable, so `AgentSession` drops the message from agent state and re-requests.
+- Uncommitted attempts keep the one silent retry and the terminal "twice" errors unchanged.
+
+### Why
+
+- Session data over seven days showed 79-83% of Claude and Kimi turns with thinking were held invisible for a median of 15-28 s (p90 31-52 s) until the first text delta, while the wrapper's silent retry fired 12 times in 58,801 assistant messages. oh-my-pi's `withReplaySafeStreamRetry` commits on `thinking_delta` and leaves post-commit empty stops to its session-level turn recovery; this mirrors that split with senpi's existing turn retry.
+
+### Why an extension could not handle it
+
+- The hold happens inside the agent loop's stream function wrapper, below `before_provider_request` and above every subscriber; no extension hook observes events before they are forwarded.
+
+### Rejected alternative
+
+- Replaying a retry after forwarding and splicing its events onto the first attempt's partial. A second `start` duplicates the partial message in the loop, and a message mixing attempt-one thinking with attempt-two content cannot be replayed to Anthropic, whose signed thinking blocks must be returned unmodified with the response that produced them.
+
+### Expected merge conflict zones
+
+- MEDIUM: `packages/agent/src/empty-assistant-recovery.ts` forwarding gate and terminal handling; `packages/ai/src/utils/retry.ts` RETRYABLE pattern list. Preserve the split: uncommitted -> in-stream retry, committed -> retryable error.
+
+## 2026-09-15 - Do not fold fields-only class bodies (#1639)
+
+### What changed
+
+- `packages/agent/src/harness/utils/read-folders/brace-scanner.ts` no longer marks a class-body `{` foldable after `HeaderProtection.open` consumes the class header. Initializer objects, static-block bodies and method bodies inside the class remain eligible.
+- `packages/agent/src/harness/utils/read-folders/header-protection.ts` returns whether `open` closed a class header, and clears the sticky assignment-target marker on the next word token so ASI-style value objects are not over-protected.
+- The adversarial grammar adds class-field, static-block, accessor, computed getter/setter and async-generator computed-method contexts. Enumeration pins 1440 programs / 244 emitted ranges / 0 counterexamples.
+- `packages/agent/src/harness/utils/read-folders/index.ts` re-freezes the measured selection receipt hash and its measurement commit after the requalified bake-off.
+
+### Why
+
+- A class whose members are only fields or `static` blocks has no method-header intervals, so a wholesale class-body fold hid every member declaration and emitted a range the independent oracle rejects.
+
+### Why an extension could not handle it
+
+- The public folder returns these ranges below either reader's extension surface; member declarations must remain visible before rendering or qualification.
+
+### Expected merge conflict zones
+
+- MEDIUM: `packages/agent/src/harness/utils/read-folders/brace-scanner.ts` class-body foldability and `header-protection.ts` `open` return. Preserve the class-body exclusion; do not whitelist `ClassBody` in the oracle.
+
+## 2026-09-14 - Computed members and assignment-pattern retention (#1639)
+
+### What changed
+
+- `packages/agent/src/harness/utils/read-folders/brace-scanner.ts` protects computed names in object literals as well as class bodies, and marks every value-position array/object so a later `=` can reclassify it.
+- `packages/agent/src/harness/utils/read-folders/header-protection.ts` gives every protected member context an interval for the overlap filter, and retrospectively protects expression-shaped assignment targets at `=`.
+- `packages/agent/src/harness/utils/read-folders/lexical-context.ts` replaces the class-only computed-name marker with that value-position marker; the brace parent now supplies member context.
+- `packages/agent/src/harness/utils/read-folders/index.ts` re-freezes the measured selection receipt hash and its measurement commit after the requalified bake-off.
+- The independent AST oracle excludes complete assignment target subtrees, and the production bake-off requires the fixed adversarial grammar to pass before freezing a receipt.
+
+### Why
+
+- Computed member names and destructuring-assignment defaults can contain executable object literals without becoming implementation bodies. Both interior and enclosing folds must retain them.
+
+### Why an extension could not handle it
+
+- The public folder returns these ranges below either reader's extension surface; safety must be proved before rendering or qualification.
+
+### Expected merge conflict zones
+
+- MEDIUM: `packages/agent/src/harness/utils/read-folders/brace-scanner.ts` and `packages/agent/src/harness/utils/read-folders/header-protection.ts` delimiter state. Preserve retrospective target protection and rejection of every overlapping fold.
+
+## 2026-09-14 - Declaration-safe read qualification (#1639)
+
+### What changed
+
+- `packages/agent/src/harness/utils/read-folders/header-protection.ts` tracks class/function headers and protected parameter, binding and nested declaration intervals until a proven implementation body.
+- `packages/agent/src/harness/utils/read-folders/brace-scanner.ts` rejects every candidate range that overlaps those intervals and fails raw when a type/operator boundary cannot be proved.
+- `packages/agent/src/harness/utils/read-folders/{index,lexical-context,lexical-spans}.ts` freeze the requalified JSON-only default while retaining safe JS/TS candidates for measurement.
+
+### Why
+
+- Declaration text inside class heritage, return types or nested headers must remain visible even when a numerically valid outer body range would contain it. The conservative candidate no longer meets the JavaScript quality threshold, so JavaScript must ship raw.
+
+### Why an extension could not handle it
+
+- The shared folder and default-language registry run below extensions in both read implementations; only this layer can prevent unsafe ranges from reaching the renderer.
+
+### Expected merge conflict zones
+
+- MEDIUM: `packages/agent/src/harness/utils/read-folders/brace-scanner.ts` lexical state and `index.ts` frozen selection. Preserve overlap rejection and JSON-only enablement during upstream integration.
+
+## 2026-09-13 - Corrective production read selection (#1639)
+
+### What changed
+
+- `packages/agent/src/harness/tools/read.ts` reuses `FileError("aborted")` after fresh bytes and before folding.
+- `packages/agent/src/harness/utils/read-folders/index.ts` originally bound JS/JSON defaults; the 2026-09-14 requalification above supersedes that selection and keeps JS/TS raw.
+- `packages/agent/src/harness/utils/read-folders/brace-scanner.ts` protects arrow-return signatures and classifies definite call arguments, balanced brace-free type arguments and comparison scopes without dropping ambiguity guards.
+- `packages/agent/src/harness/utils/segmented-read-view.ts` proves renderer exhaustiveness while preserving runtime invalid-segment errors.
+
+### Why
+
+- `packages/agent/src/harness/tools/read.ts` must preserve the environment's structured cancellation code rather than throwing an untyped cancellation error.
+
+### Why an extension could not handle it
+
+- `packages/agent/src/harness/tools/read.ts` is the injectable lower-level filesystem reader below extension execution.
+
+### Expected merge conflict zones
+
+- `packages/agent/src/harness/tools/read.ts`: error imports and the post-read cancellation check; both truncators remain unchanged.
+
+## 2026-09-13 - Structural default reads with exact range fallback
+
+### What changed
+
+- `packages/agent/src/harness/tools/read.ts`: default construction injects the frozen folder and composes the shared view only after the existing truncator accepts the input. Explicit ranges and optional-folder absence preserve verbatim reads; cancellation is checked before folding.
+- `packages/agent/src/harness/utils/segmented-read-view.ts`: adds the shared default-read eligibility adapter without duplicating rendering or footer policy.
+- `packages/agent/src/harness/utils/read-folders/index.ts`: exposes eligibility from the frozen language selection so custom folders cannot bypass prose/unsupported exemptions.
+
+### Why
+
+- `packages/agent/src/harness/tools/read.ts` must match the coding-agent reader's default summary and exact offset/limit rereads without altering existing truncation inclusivity or edit anchors.
+
+### Why an extension could not handle it
+
+- `packages/agent/src/harness/tools/read.ts` is the lower-level injectable tool used without the coding-agent extension runtime; both readers must call the same pure implementation.
+
+### Expected merge conflict zones
+
+- LOW: imports, default options and the text-output branch in `packages/agent/src/harness/tools/read.ts`. Preserve the raw/truncation branches and both truncate modules unchanged.
+
+## 2026-09-13 - Measured folders and shared segmented read views
+
+### What changed
+
+- `packages/agent/src/index.ts`: exports the selected folder, immutable D4 policy and pure segmented-view contract.
+- `packages/agent/src/harness/tools/read.ts`: adds the optional `ReadToolOptions.folder` type seam only; execution is unchanged pending read integration.
+- `packages/agent/src/harness/utils/segmented-read-view.ts`: owns segment validation, FIFO breadth-first refinement, exact source rendering and offset/limit footer metadata.
+- `packages/agent/src/harness/utils/read-folders/{index,types,brace-scanner,lexical-spans}.ts`: productionizes the row-17 TS/JS/JSON scanner and frozen selection without grammar dependencies; unsupported languages and prose remain explicit fallbacks.
+
+### Why
+
+- `packages/agent/src/index.ts` exposes a single reusable contract so both read surfaces can consume identical validated views without an agent-to-coding-agent dependency.
+- `packages/agent/src/harness/tools/read.ts` reserves the folder injection seam without changing today's raw reader before parity integration is verified.
+
+### Why an extension could not handle it
+
+- `packages/agent/src/index.ts` and `packages/agent/src/harness/tools/read.ts` own the public library exports and reader options used below the coding-agent extension layer.
+
+### Expected merge conflict zones
+
+- LOW: `packages/agent/src/index.ts` utility re-exports and `packages/agent/src/harness/tools/read.ts` imports/options; no execute or truncation changes.
+
+## 2026-09-13 - Keep the harness/session entry graph off the AI barrel
+
+### What changed
+
+- `packages/agent/src/harness/messages.ts`: `dropFailedAssistantTurns` is imported from `@earendil-works/pi-ai/utils/drop-failed-assistant-turns` and AI message types stay `import type` from the barrel. `convertToLlm` behavior is unchanged.
+
+### Why
+
+- `./harness/session` value-imports `jsonl/legacy-v3.ts` through storage/repo, and that file value-imports the two summary factories from `messages.ts`. The mixed barrel import of `dropFailedAssistantTurns` (ab68b5eb0) turned that type-only edge into a runtime walk of `packages/ai/src/index.ts` (132 files vs budget 25). The helper is a leaf already exported on `./utils/*`.
+
+### Why an extension could not handle it
+
+- Entry-graph budgets are a compile-time import contract. Extensions cannot change which module `messages.ts` evaluates.
+
+### Expected merge conflict zones
+
+- LOW: the import lines at the top of `packages/agent/src/harness/messages.ts`.
+
+## 2026-09-10 - Honor an inline isError on returned tool results
+
+### What changed
+
+- packages/agent/src/types.ts: `AgentToolResult` declares `isError?: boolean` so a tool can report a failure without throwing while keeping `content` and `details` intact.
+- packages/agent/src/agent-loop.ts: `executePreparedToolCall` carries `settled.isError === true` into the executed outcome instead of hardcoding `isError: false`, so `tool_execution_end` and the `toolResult` message flag the failure.
+
+### Why
+
+- Structured-failure tools (omo's team and memory tools, the terminal tool) return `isError: true` with typed `details` for the model to branch on. The loop dropped that flag, so the TUI painted the row as success, the RPC `tool_execution_end.isError` the desktop GUI maps to "failed" stayed false, and `tool_result` hooks saw a success.
+
+### Why this lives in the fork
+
+- The error flag is decided inside the loop's execution outcome before any hook runs; extensions can only rewrite it per tool through `tool_result`, not restore the contract for every tool.
+- This deliberately diverges from upstream pi-mono, which documents "returning a value never sets the error flag"; `packages/coding-agent/docs/extensions.md` now documents both signaling paths.
+
+### Expected merge conflict zones
+
+- `executePreparedToolCall` return in packages/agent/src/agent-loop.ts and the `AgentToolResult` interface in packages/agent/src/types.ts.
+
+## 2026-09-10 - Use native TypeScript builds for omob performance
+
+### What changed
+
+- packages/agent/package.json: build uses tsgo for the emitted workspace build.
+
+### Why
+
+- The native compiler reduces omob build time without changing runtime JavaScript.
+
+### Why this lives in the fork
+
+- The package build manifest owns the compiler used by the fork's release pipeline.
+
+### Expected merge conflict zones
+
+- The `build` script in packages/agent/package.json.
 ## 2026-09-05 - Preserve Astra reasoning effort across session changes
 
 ### What changed
@@ -44,6 +296,29 @@
 - Agent loop configuration and session entry unions.
 
 # Changes
+
+## 2026-09-08 - Recover empty native tool-use responses
+
+### What changed
+
+- `packages/agent/src/empty-assistant-recovery.ts`: retry terminal native `toolUse` responses with no tool-call blocks once, then surface an error and telemetry diagnostic; preserve existing empty-stop gating.
+- `packages/agent/src/assistant-terminal-state.ts`: demote contradictory tool-use terminal messages without tool calls, stamping an `empty_tool_use_terminal_state` diagnostic so the demotion stays identifiable after the stop reason is rewritten.
+- `packages/agent/src/agent-loop.ts`: compose terminal normalization with pending-tool promotion.
+- `packages/agent/src/index.ts`: export `EMPTY_TOOL_USE_DEMOTION_DIAGNOSTIC` so the goal builtin can recognize a demoted malformed turn.
+
+### Why
+
+- Providers can lose a streamed tool call while retaining the `toolUse` stop reason, which otherwise silently ends the user's session.
+
+### Why an extension could not handle it
+
+- Provider stream buffering and terminal-state normalization occur inside the core agent loop before extension callbacks observe the message.
+
+### Expected merge conflict zones
+
+- MEDIUM: `empty-assistant-recovery.ts` stream terminal handling and `agent-loop.ts` terminal message normalization.
+- LOW: the `assistant-terminal-state.ts` re-export line in `index.ts`.
+
 
 ## 2026-09-04 - Drop the byte count from write-tool results
 
@@ -1348,3 +1623,33 @@ Conflict zone: `agent-loop.ts` `streamAssistantResponse` catch.
 ### Expected merge conflict zones on next upstream sync
 
 - LOW: `packages/agent/src/agent-loop.ts` streaming event switch and terminal response paths.
+
+## 2026-09-12 - Upstream sync (upstream/main@71dca871) integration repairs
+
+### What changed
+
+- `packages/agent/src/harness/compaction/branch-summarization.ts`: upstream body, but the summary text comes from the fork's `contentTextForSummary` (summary-safe content extraction) instead of `contentText`.
+- `packages/agent/src/harness/compaction/compaction.ts`: upstream body plus the fork's `dropFailedAssistantTurns` accounting in `estimateContextTokens` (a counted set so failed turns are neither estimated nor used as the last usage anchor, indices still relative to the input array), the fork cut-point fallback to the last candidate when no cut point clears the budget, and `contentTextForSummary` at both summary sites.
+- `packages/agent/src/harness/env/nodejs.ts`: upstream capture/spill rewrite plus the fork's shell hardening: `windowsTaskkillCandidates`/`killWindowsProcessTree` (synchronous `spawnSync` over every existing System32/Sysnative `taskkill.exe` before the PATH name, direct kill as last resort), promise-returning `onUpdate` observers tracked and awaited with a 5 s `NORMAL_CALLBACK_SETTLEMENT_TIMEOUT_MS` bound, and `callback_error` carrying the raw rejected value as `cause`.
+- `packages/agent/src/harness/messages.ts`: `convertToLlm` ends with the fork's `dropFailedAssistantTurns` so failed provider turns never replay, and `CompactionSummaryMessage` keeps the fork `details?: unknown` field.
+- `packages/agent/src/harness/runtime/drive/retry.ts`: `retryNotBefore` widens its policy `Pick` to include `random` so the fork's injectable jitter source reaches `retryDelayMs` from the runtime retry path (the fork jitters before the `maxAgentDelayMs` cap, D-M).
+- `packages/agent/src/harness/tools/edit.ts`: upstream signature and mutation-queue plumbing plus the fork `postMutate` seam (`runPostMutate` inside the same queue slot, re-read on `fileMayHaveChanged`, diff and patch recomputed against the committed bytes, `rereadNote`, `appendPostMutateNote`).
+- `packages/agent/src/harness/tools/write.ts`: same `postMutate` seam; the success text stays `Successfully wrote to <path>` with the hook note appended.
+- `packages/agent/src/harness/types.ts`: `ShellExecOptions.onUpdate` returns `void | PromiseLike<void>` so awaited output callbacks survive; `FileError`/`ExecutionError`/`CompactionError` expose a `readonly cause?: unknown` and `ExecutionError` accepts a non-Error cause; `getOrUndefined` keeps the fork nullable-normalizing signature (no caller of upstream's Result-unwrapping overload on either side).
+- `packages/agent/src/harness/utils/shell-output.ts`: `ShellCaptureOptions.onChunk` may return a promise and its settlement is returned to the environment so a rejection becomes `ExecutionError("callback_error")` instead of an unhandled rejection.
+- `packages/agent/src/index.ts`: adds the fork export line for `EMPTY_TOOL_USE_DEMOTION_DIAGNOSTIC` and `ProviderRetryWatchdogAbortError` from `assistant-terminal-state.ts`.
+- `packages/agent/src/types.ts`: keeps the fork loop surface: `thinkingSelection`, `abortServerSideFallback`, `cursorExecHandlers` (with the run-signal factory form), `streamStartTimeoutMs`/`initialRequestTimeoutMs`/`initialRequestStreamStartTimeoutMs`, `restorePendingMessages`, `removedToolHints`, `resolveUnknownToolCall`, wave-based parallel tool scheduling docs, `AgentToolResult.isError`, `reasoningBaseline` and the `@earendil-works/pi-agent-core` module-augmentation example.
+
+### Why
+
+- The fork's loop contract (failed-turn dropping, Astra prompt-cache prefix stability, Cursor exec channel, stream-start watchdogs, post-mutate hooks, hardened Windows process-tree kills, awaited output observers) has to survive upstream's runtime/session generation; these files are the living boundaries where that behavior is expressed.
+
+### Why an extension could not handle it
+
+- Context estimation, message projection, tool execution order, error `cause` typing and the harness's public option types are core wire and type contracts consumed by every lane; an extension cannot interpose on them.
+
+### Expected merge conflict zones
+
+- HIGH: `packages/agent/src/harness/env/nodejs.ts` capture pipeline and Windows kill path; `packages/agent/src/types.ts` `AgentLoopConfig`/`AgentTool` interfaces.
+- MEDIUM: `estimateContextTokens`/`findCutPoint` in `compaction.ts`; `execute` bodies of `tools/edit.ts` and `tools/write.ts`; `ShellExecOptions` in `harness/types.ts`.
+- LOW: `convertToLlm` tail in `harness/messages.ts`; `retryNotBefore` signature; the `assistant-terminal-state.ts` export line in `index.ts`.

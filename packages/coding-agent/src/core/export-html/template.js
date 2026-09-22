@@ -314,41 +314,41 @@
       }
 
       /**
-       * Parse a current or legacy skill invocation from message text.
-       * Kept in sync with core/agent-session.ts for standalone HTML exports.
+       * Parse every chained current or legacy skill invocation from message text.
+       * Kept in sync with core/skill-invocation.ts for standalone HTML exports.
        */
       function parseSkillBlock(text) {
         const instructionPattern =
           /^The user explicitly invoked the "([^"]+)" skill\. Follow the instructions in <skill-instruction> as binding for this request, while respecting higher-priority instructions\.\n\n<skill-instruction name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill-instruction>/;
-        const instructionMatch = text.match(instructionPattern);
-        if (instructionMatch) {
-          if (instructionMatch[1] !== instructionMatch[2]) return null;
-          let remainder = text.slice(instructionMatch[0].length);
+        const matchSkill = (source) => {
+          const match = source.match(instructionPattern);
+          if (!match || match[1] !== match[2]) return null;
+          return { skill: { name: match[1], location: match[3], content: match[4] }, length: match[0].length };
+        };
+        const toBlock = (skills, userMessage) => ({ ...skills[0], skills, userMessage });
+        const first = matchSkill(text);
+        if (first) {
+          const skills = [first.skill];
+          let remainder = text.slice(first.length);
           while (remainder.startsWith("\n\nThe user explicitly invoked the ")) {
-            const chainedMatch = remainder.slice(2).match(instructionPattern);
-            if (!chainedMatch || chainedMatch[1] !== chainedMatch[2]) return null;
-            remainder = remainder.slice(chainedMatch[0].length + 2);
+            const chained = matchSkill(remainder.slice(2));
+            if (!chained) return null;
+            skills.push(chained.skill);
+            remainder = remainder.slice(chained.length + 2);
           }
           const requestMatch = remainder.match(/^\n\n<user-request>\n([\s\S]*?)\n<\/user-request>$/);
           if (remainder && !requestMatch) return null;
-          return {
-            name: instructionMatch[1],
-            location: instructionMatch[3],
-            content: instructionMatch[4],
-            userMessage: requestMatch?.[1].trim() || undefined,
-          };
+          return toBlock(skills, requestMatch?.[1].trim() || undefined);
         }
 
         const legacyMatch = text.match(
           /^<skill name="([^"]+)" location="([^"]+)">\n([\s\S]*?)\n<\/skill>(?:\n\n([\s\S]+))?$/,
         );
         if (!legacyMatch) return null;
-        return {
-          name: legacyMatch[1],
-          location: legacyMatch[2],
-          content: legacyMatch[3],
-          userMessage: legacyMatch[4]?.trim() || undefined,
-        };
+        return toBlock(
+          [{ name: legacyMatch[1], location: legacyMatch[2], content: legacyMatch[3] }],
+          legacyMatch[4]?.trim() || undefined,
+        );
       }
 
       function getSearchableText(entry, label) {
@@ -669,7 +669,8 @@
               const rawContent = extractContent(msg.content);
               const skillBlock = parseSkillBlock(rawContent);
               if (skillBlock) {
-                let treeHtml = labelHtml + `<span class="tree-role-skill">skill:</span> ${escapeHtml(skillBlock.name)}`;
+                const skillNames = skillBlock.skills.map((skill) => skill.name).join(', ');
+                let treeHtml = labelHtml + `<span class="tree-role-skill">skill:</span> ${escapeHtml(skillNames)}`;
                 if (skillBlock.userMessage) {
                   treeHtml += ` · <span class="tree-role-user">user:</span> ${escapeHtml(truncate(normalize(skillBlock.userMessage)))}`;
                 }
@@ -1235,11 +1236,15 @@
               const hasUserContent = skillBlock.userMessage || images.length > 0;
               let html = `<div class="skill-user-entry" id="${entryDomId}">${copyBtnHtml}${tsHtml}`;
 
-              // Skill invocation (collapsed by default, click to expand)
+              // Skill invocation (collapsed by default, click to expand); one body per invoked skill
+              const skillNames = skillBlock.skills.map((skill) => skill.name).join(', ');
+              const skillBodies = skillBlock.skills
+                .map((skill) => `<div class="skill-invocation-name">${escapeHtml(skill.name)}</div>${safeMarkedParse(skill.content)}`)
+                .join('');
               html += `<div class="skill-invocation" onclick="if(window.getSelection().toString())return;this.classList.toggle('expanded')">
-                <div class="skill-invocation-label">[skill] ${escapeHtml(skillBlock.name)}</div>
-                <div class="skill-invocation-collapsed">${escapeHtml(skillBlock.name)} (click to expand)</div>
-                <div class="skill-invocation-content markdown-content">${safeMarkedParse(skillBlock.content)}</div>
+                <div class="skill-invocation-label">[skill] ${escapeHtml(skillNames)}</div>
+                <div class="skill-invocation-collapsed">${escapeHtml(skillNames)} (click to expand)</div>
+                <div class="skill-invocation-content markdown-content">${skillBodies}</div>
               </div>`;
 
               // User message (separate block if present)

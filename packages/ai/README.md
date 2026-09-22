@@ -26,6 +26,7 @@ Unified LLM API with provider collections, automatic auth resolution, token and 
   - [Streaming Tool Calls with Partial JSON](#streaming-tool-calls-with-partial-json)
   - [Validating Tool Arguments](#validating-tool-arguments)
   - [Complete Event Reference](#complete-event-reference)
+  - [Compact Assistant Message Frames](#compact-assistant-message-frames)
 - [Image Input](#image-input)
 - [Image Generation](#image-generation)
 - [Thinking/Reasoning](#thinkingreasoning)
@@ -57,6 +58,7 @@ Unified LLM API with provider collections, automatic auth resolution, token and 
 ## Supported Providers
 
 - **OpenAI**
+- **B.AI** (credential-scoped multi-provider catalog)
 - **Ant Ling**
 - **Azure OpenAI (Responses)**
 - **OpenAI Codex** (ChatGPT Plus/Pro subscription, requires OAuth, see below)
@@ -328,6 +330,13 @@ const fresh = models.getModel('llamacpp', 'qwen3-30b');
 
 Static built-in providers are no-ops for `refresh()`. See [createProvider()](#createprovider) for building a dynamic provider.
 
+B.AI is dynamic: `GET https://api.b.ai/v1/models` returns the model IDs available to the current credential,
+while the shipped catalog supplies B.AI's documented capabilities and standard reference pricing. B.AI serves
+one key over three protocols and documents several models on more than one of them, so Senpi pins the endpoint
+per model rather than treating it as a B.AI property: GPT and DeepSeek use OpenAI Responses, Claude uses
+Anthropic Messages, and the remaining chat families use OpenAI Chat Completions. Image-only IDs such as
+`gpt-image-2` are not exposed through the chat catalog.
+
 ## Auth
 
 Every provider owns its auth: how API keys resolve (stored credentials, environment variables, ambient sources like AWS profiles or gcloud ADC) and, where supported, OAuth login/refresh flows.
@@ -420,6 +429,7 @@ Built-in providers resolve these env vars (Node.js; in browsers pass `apiKey` ex
 | Provider | Environment Variable(s) |
 |----------|------------------------|
 | OpenAI | `OPENAI_API_KEY` |
+| B.AI | `BAI_API_KEY` |
 | Ollama Cloud | `OLLAMA_API_KEY` |
 | Ant Ling | `ANT_LING_API_KEY` |
 | Azure OpenAI | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` (e.g. `https://{resource}.ai.azure.com`) or `AZURE_OPENAI_RESOURCE_NAME`. Supports `*.openai.azure.com`, `*.cognitiveservices.azure.com` and `*.ai.azure.com`; root endpoints auto-normalize to `/openai/v1`. Optional: `AZURE_OPENAI_API_VERSION` (default `v1`), `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. |
@@ -437,6 +447,7 @@ Built-in providers resolve these env vars (Node.js; in browsers pass `apiKey` ex
 | Fireworks | `FIREWORKS_API_KEY` |
 | Together AI | `TOGETHER_API_KEY` |
 | Baseten | `BASETEN_API_KEY` |
+| Venice AI | `VENICE_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
 | Vercel AI Gateway | `AI_GATEWAY_API_KEY` |
 | OpenGateway | `OPENGATEWAY_API_KEY` |
@@ -447,7 +458,7 @@ Built-in providers resolve these env vars (Node.js; in browsers pass `apiKey` ex
 | Moonshot AI / Moonshot AI (China) | `MOONSHOT_API_KEY` |
 | Hugging Face | `HF_TOKEN` |
 | OpenCode Zen / OpenCode Go | `OPENCODE_API_KEY` |
-| Kimi For Coding | `KIMI_API_KEY` |
+| Kimi For Coding | `KIMI_API_KEY` (+ `KIMI_CODE_REGION`) |
 | Qwen Token Plan (existing catalog) | `QWEN_TOKEN_PLAN_API_KEY` |
 | Qwen Token Plan (Individual) | `QWEN_TOKEN_PLAN_API_KEY` |
 | Qwen Token Plan (China) | `QWEN_TOKEN_PLAN_CN_API_KEY` |
@@ -661,6 +672,10 @@ for await (const event of s) {
 
 ### Complete Event Reference
 
+Successful generation follows `start → updates* → done`. A failure after generation starts follows `start → updates* → error`. Request setup may fail before generation starts, in which case the stream contains only `error`; `done` and update events are invalid before `start`. Direct API `streamSimple()` calls throw synchronously when request auth is missing.
+
+Every non-terminal event's `partial` is the shared live response-so-far helper. It is intentionally not an event-time snapshot: providers may mutate the same message and content blocks as generation advances, including while older events wait in the stream queue. Inspect it when handling an event instead of retaining it as historical state. Text and ordinary thinking blocks are empty when their `*_start` event is emitted and grow only through matching `*_delta` events until the authoritative `*_end`; redacted thinking may be complete at start and emit no deltas. Tool-call arguments at `toolcall_start` are provider-specific; `toolcall_delta` carries subsequent JSON updates.
+
 All streaming events emitted during assistant message generation:
 
 | Event Type | Description | Key Properties |
@@ -674,11 +689,39 @@ All streaming events emitted during assistant message generation:
 | `thinking_end` | Thinking block complete | `content`: Full thinking, `contentIndex`: Position |
 | `toolcall_start` | Tool call begins | `contentIndex`: Position in content array |
 | `toolcall_delta` | Tool arguments streaming | `delta`: JSON chunk, `partial.content[contentIndex].arguments`: Partial parsed args |
-| `toolcall_end` | Tool call complete | `toolCall`: Complete validated tool call with `id`, `name`, `arguments` |
+| `toolcall_end` | Tool call complete | `toolCall`: Complete, but not schema-validated, tool call with `id`, `name`, `arguments` |
 | `done` | Stream complete | `reason`: Stop reason ("stop", "length", "toolUse"), `message`: Final assistant message |
 | `error` | Error occurred | `reason`: Error type ("error" or "aborted"), `error`: AssistantMessage with partial content |
 
 Streaming events for different content blocks are not guaranteed to be contiguous. Providers may emit deltas for text, thinking, and tool calls in the same upstream chunk, and pi may surface corresponding events interleaved, for example `text_start`, `text_delta`, `toolcall_start`, `text_delta`, `toolcall_delta`. Consumers must use `contentIndex` to associate each delta/end event with its block and must not assume that a block's `*_start`/`*_delta`/`*_end` sequence is uninterrupted by events for other blocks.
+
+### Compact Assistant Message Frames
+
+`AssistantMessageFrameEncoder` converts one stream into compact, persistable `AssistantMessageFrame` values. Create one encoder per stream and feed it every event in order. The encoder understands that `partial` is live: a block-start event consumed after the provider has already queued later deltas snapshots the current block once, and covered queued text/thinking deltas produce no duplicate frame. It retains only per-open-block counters plus, temporarily, the raw prefix needed to synchronize an already-advanced tool call. It never clones the growing full partial per token.
+
+The start frame contains message metadata with empty content. Text and thinking frames store each generated character at most once before the authoritative end frame. Tool calls that were already advanced when their start event was consumed use one compact JSON checkpoint before ordinary deltas resume. Terminal `done` and `error` events produce no frame because final message settlement is separate. A pre-generation `error` therefore produces no frames.
+
+`reduceAssistantMessageFrames()` is the canonical pure reducer. It reconstructs text, thinking, and tool-call arguments, including interleaved blocks identified by `contentIndex`, and rejects malformed sequences. It performs a single pass over the iterable and returns `undefined` when there is no start frame. End frames replace blocks with the provider's authoritative completed content and metadata. The reducer does not validate tool arguments against a TypeBox schema; call `validateToolCall` before execution.
+
+```typescript
+import {
+  AssistantMessageFrameEncoder,
+  reduceAssistantMessageFrames,
+  type AssistantMessageFrame,
+} from '@earendil-works/pi-ai';
+
+const encoder = new AssistantMessageFrameEncoder();
+const frames: AssistantMessageFrame[] = [];
+for await (const event of s) {
+  const frame = encoder.encode(event);
+  if (frame) frames.push(frame);
+}
+
+const reconstructedPartial = reduceAssistantMessageFrames(frames);
+const finalMessage = await s.result(); // Persist terminal settlement separately.
+```
+
+An encoder rejects duplicate starts, updates before start, `done` before start, events after a terminal event, duplicate block starts, and block-kind mismatches. An `error` before start is valid and returns no frame.
 
 ## Image Input
 
@@ -904,7 +947,7 @@ Every `AssistantMessage` includes a `stopReason` field that indicates how the ge
 
 ## Error Handling
 
-Request failures never throw out of the stream functions: when a request ends with an error (including aborts and tool call validation errors), the streaming API emits an error event and the final message carries the details:
+Request failures after a stream is returned never throw: when a request ends with an error (including aborts and tool call validation errors), the streaming API emits an error event and the final message carries the details. Setup failures may emit `error` without `start`; failures after generation begins emit `start`, any observed updates, then `error`. Direct API `streamSimple()` calls throw synchronously when request auth is missing:
 
 ```typescript
 // In streaming
@@ -926,7 +969,7 @@ if (message.stopReason === 'error' || message.stopReason === 'aborted') {
 }
 ```
 
-Auth failures (no key configured, OAuth refresh failed, unknown provider) surface the same way: as a stream error with `stopReason: "error"`.
+When using a provider collection, auth failures (OAuth refresh failed, unknown provider) surface as a stream error with `stopReason: "error"`. Direct API `streamSimple()` calls instead throw synchronously when their required auth is absent.
 
 ### Aborting Requests
 
@@ -1186,7 +1229,7 @@ interface OpenAICompletionsCompat {
   supportsUsageInStreaming?: boolean; // Whether provider supports `stream_options: { include_usage: true }` (default: true)
   supportsStrictMode?: boolean;      // Whether provider supports `strict` in tool definitions (default: true)
   supportsOpenAIGrammarTools?: boolean; // Whether to emit OpenAI custom Lark/regex grammar tools; false falls back to normal function tools (default: false; the generated catalog enables it for capable models)
-  sendSessionAffinityHeaders?: boolean; // Send session-affinity data from `sessionId` (default: false)
+  sendSessionAffinityHeaders?: boolean; // Send session-affinity data from `sessionId` (default: true for OpenRouter, false otherwise)
   sessionAffinityFormat?: 'openai' | 'openai-nosession' | 'openrouter'; // Format for session affinity: 'openai' uses `prompt_cache_key`, `session_id`, `x-client-request-id`, and `x-session-affinity`; 'openai-nosession' uses `prompt_cache_key`, `x-client-request-id`, and `x-session-affinity`; 'openrouter' uses `x-session-id` (default: auto-detected)
   maxTokensField?: 'max_completion_tokens' | 'max_tokens';  // Which field name to use (default: max_completion_tokens)
   requiresToolResultName?: boolean;  // Whether tool results require the `name` field (default: false)
@@ -1211,6 +1254,8 @@ interface OpenAIResponsesCompat {
   supportsOpenAIGrammarTools?: boolean; // Whether to emit OpenAI custom Lark/regex grammar tools; false falls back to normal function tools (default: false; the generated catalog enables it for capable models)
 }
 ```
+
+OpenRouter requests send `x-session-id` from `sessionId` when prompt caching is enabled. Chat Completions and Anthropic Messages both auto-detect OpenRouter endpoints unless `sendSessionAffinityHeaders` is explicitly false. On Anthropic-compatible models, `sessionAffinityFormat: "openrouter"` selects `x-session-id`; when unset, the existing `x-session-affinity` format is used. Explicit request headers take precedence over generated headers.
 
 If `compat` is not set, the library falls back to URL-based detection. If `compat` is partially set, unspecified fields use the detected defaults. This is useful for:
 

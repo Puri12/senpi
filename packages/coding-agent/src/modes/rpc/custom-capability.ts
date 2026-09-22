@@ -27,6 +27,34 @@ export const AUTO_TITLE_SESSIONS_CAPABILITY = "auto_title_sessions";
  * placeholders for this connection; the client fetches a block on demand with `get_media`.
  */
 export const MEDIA_PLACEHOLDERS_CAPABILITY = "media_placeholders";
+/** Opt-in: the client can present a multi-question `extension_ui_request{method:"question"}`. */
+export const QUESTION_CAPABILITY = "question";
+
+/**
+ * HOST capability (advertised in `get_protocol_info`, never sent by a client):
+ * this host honors `open_session.retain_on_disconnect`, so a session opened with
+ * that flag survives its last client's disconnect instead of being closed with it.
+ */
+export const RETAIN_ON_DISCONNECT_CAPABILITY = "retain_on_disconnect";
+
+/**
+ * HOST capability: this host accepts `open_session.context`, hands it to that session's
+ * extensions as `pi.sessionContext`, and republishes it on `list_sessions { include_workers: true }`.
+ */
+export const SESSION_CONTEXT_CAPABILITY = "session_context";
+
+/**
+ * HOST capability: this host accepts `open_session.kind`, publishes `kind` on every
+ * `list_sessions` row, hides `worker` rows unless `include_workers` is set, and keeps a
+ * worker session's lifecycle records on the connections attached to it.
+ */
+export const SESSION_KIND_CAPABILITY = "session_kind";
+
+/**
+ * HOST capability: this host honors `open_session.auto_title`, so a session can opt
+ * into or out of engine-side titling independently of `--auto-title-sessions`.
+ */
+export const AUTO_TITLE_PER_SESSION_CAPABILITY = "auto_title_per_session";
 
 /**
  * Env var carrying client capabilities to a single-connection stdio RPC host

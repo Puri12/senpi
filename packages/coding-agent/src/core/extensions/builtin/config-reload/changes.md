@@ -1,5 +1,64 @@
 # config-reload Extension Changes
 
+## 2026-09-21 - Share one recursive FS-watch worker across sessions (#1794)
+
+### What changed
+
+- `watch-event-source.ts` hoists the recursive watch worker, its subscription table, and the subscription id counter from per-source closure state into a process-wide registry keyed by the worker-factory identity. The default factory resolves to a single entry, so every `createFsWatchEventSource()` without an injected factory — one per config-reload extension instance, i.e. one per session — shares one `node:worker_threads` Worker instead of each constructing its own.
+- Subscriptions carry their owning source's `onError`, so message-kind errors and worker-death fan-out still reach the right handler while the worker is shared. Id-routed dispatch, crash replacement, and last-unsubscribe termination semantics are unchanged, now process-wide per factory key.
+- New `resetFsWatchWorkersForTests()` export terminates live workers best-effort and clears the registry for test isolation.
+
+### Why
+
+- The shared in-process RPC host loads one config-reload instance per session and every session added one watch thread and a few MB (1,023 threads at 1,000 sessions — #1794). The watched directories are identical per host, so N workers were N-1 redundant.
+
+### Why an extension could not handle it
+
+- The event source and its worker lifecycle are internal to this builtin; no extension API controls worker construction.
+
+### Expected merge conflict zones
+
+- MEDIUM: `watch-event-source.ts` worker registry and `createFsWatchEventSource` body. Tests extended in `test/suite/config-reload-worker-shutdown.test.ts` and `test/rpc-multi-session-isolation.test.ts`.
+
+## 2026-09-14 - Join watcher disposal and skip nonpersistent RPC probes (#1656)
+
+### What changed
+
+- Watch-worker registration checks a shared cancellation flag before and after `fs.watch`, so a shutdown that wins the post-load/pre-registration interleaving never retains a native watcher.
+- `ConfigReloadWatchEngine.close()` cancels synchronously and joins returned disposers; repeated close shares that join and surfaces `AggregateError` if any disposer fails.
+- `session_shutdown` awaits those joins. Nonpersistent RPC sessions (`getSessionFile() === undefined`) do not start OS watches.
+
+### Why
+
+- Fire-and-forget unsubscribe during exit left FSEvents streams running into process teardown (`pthread_join` hang). Snapshot-only RPC probes never needed live watches.
+
+### Why an extension could not handle it
+
+- The event source and watch engine are internal to this builtin; process shutdown must observe their disposal.
+
+### Expected merge conflict zones
+
+- MEDIUM: `watch-event-source.ts` worker source and unsubscribe join; `watch-engine.ts` `close()`; `index.ts` `session_shutdown` / `rebuildWatchers`.
+
+## 2026-09-11 - Keep per-source changelog acknowledgements routine (senpi#1583)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/config-reload/routine-settings.ts`: classifies `changelogSeen` as routine settings during reload filtering.
+
+### Why
+
+- Acknowledging a changelog must not trigger a substantive configuration reload or cascade across sessions.
+
+### Why an extension could not handle it
+
+- The routine-setting classification is internal to the builtin reload diff before extension callbacks run.
+
+### Expected merge conflict zones
+
+- LOW: the routine settings key set.
+
+
 ## Offload non-recursive watch creation to the worker (2026-09-02)
 
 ### What changed

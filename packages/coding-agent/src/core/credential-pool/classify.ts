@@ -1,3 +1,4 @@
+import { PROVIDER_NOT_CONFIGURED_PREFIX } from "@earendil-works/pi-ai";
 import { DEFAULT_SLOT_BLOCK_MS, MAX_SLOT_BLOCK_MS } from "@earendil-works/pi-ai/auth/pool/failover";
 import { normalizeProviderError } from "@earendil-works/pi-ai/utils/error-body";
 import { getOverflowPatterns } from "@earendil-works/pi-ai/utils/overflow";
@@ -45,6 +46,13 @@ const BILLING_TEXT =
 const OVERLOAD_TEXT = /overloaded/i;
 const NETWORK_TEXT =
 	/econnreset|econnrefused|etimedout|enotfound|socket hang up|fetch failed|network error|request timed out/i;
+// A WebSocket transport reports its faults as close codes and adapter
+// verdicts rather than HTTP text. 1008 (policy) and 1009 (message too big)
+// describe the request, so replaying it cannot help; every other closure,
+// the runtime's bare error event, and the connect/liveness watchdogs are the
+// transport's fault and earn the same-slot retry a reset does.
+const WEBSOCKET_REQUEST_FAULT_TEXT = /websocket closed 100[89]\b/i;
+const WEBSOCKET_TRANSPORT_FAULT_TEXT = /websocket (?:closed|error|connect timeout|liveness timeout)/i;
 const FAIL_FAST_TEXT =
 	/context[ _-]?(?:length|window)|maximum context|invalid[ _-]?model|model[ _-]?not[ _-]?found|malformed[ _-]?stream|premature[ _-]?(?:close|stream)/i;
 const ABORT_TEXT = /\baborted?\b/i;
@@ -76,6 +84,13 @@ export function classifyCredentialFailure(
 	const failureCount = context.failureCount ?? 0;
 
 	if (isAbort(error, text)) return { kind: "fail_request" };
+	// A slot whose material no longer resolves to usable auth is a per-credential
+	// fault, not a provider-wide one: failing the request here would let ONE bad
+	// slot dead-end a pool whose siblings are healthy. The block is permanent
+	// because only a re-login or a repaired entry can change that answer.
+	if (text.includes(PROVIDER_NOT_CONFIGURED_PREFIX)) {
+		return { kind: "failover", block: { reason: "auth_error" } };
+	}
 	if (status === 401 || INVALID_KEY_TEXT.test(text)) {
 		return { kind: "failover", block: { reason: "auth_error" } };
 	}
@@ -105,6 +120,10 @@ export function classifyCredentialFailure(
 	}
 	if (isOverflowText(text) || status === 400 || status === 404 || FAIL_FAST_TEXT.test(text)) {
 		return { kind: "fail_request" };
+	}
+	if (WEBSOCKET_REQUEST_FAULT_TEXT.test(text)) return { kind: "fail_request" };
+	if (WEBSOCKET_TRANSPORT_FAULT_TEXT.test(text)) {
+		return { kind: "retry_same", maxAttempts: RETRY_SAME_MAX_ATTEMPTS };
 	}
 	if (status === 529 || OVERLOAD_TEXT.test(text) || (status !== undefined && status >= 500 && status < 600)) {
 		return { kind: "retry_same", maxAttempts: RETRY_SAME_MAX_ATTEMPTS };

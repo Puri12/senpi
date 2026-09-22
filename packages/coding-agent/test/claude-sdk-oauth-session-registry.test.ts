@@ -181,6 +181,7 @@ function continuityFor(sessionId: string, extra: { idleExpired: boolean }) {
 		modelId: "claude-test",
 		fingerprint: { toolsetHash: "tools-v1", systemPromptHash: "prompt-v1" },
 		transcriptAvailable: true,
+		crossAccountResumeSupported: true,
 		...extra,
 	});
 }
@@ -550,7 +551,13 @@ describe("Claude SDK OAuth session registry", () => {
 		const { query, registry, entry } = pumpFixture();
 		const turn = submitSessionTurn(registry, entry, { message: userContent });
 		await submittedMessage(entry);
-		query.emit({ type: "result", subtype: "error_during_execution", is_error: true, result: "rate_limit", session_id: entry.sdkSessionId } as unknown as SDKMessage);
+		query.emit({
+			type: "result",
+			subtype: "error_during_execution",
+			is_error: true,
+			result: "rate_limit",
+			session_id: entry.sdkSessionId,
+		} as unknown as SDKMessage);
 		await expect(turn).rejects.toThrow(/rate_limit/i);
 		expect(query.closes).toBe(1);
 	});

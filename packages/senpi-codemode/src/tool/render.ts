@@ -25,13 +25,14 @@ import type {
 	EvalCellResult,
 	EvalInputSchema,
 	EvalLanguage,
+	EvalResultDetails,
 	EvalStatusEvent,
 	EvalToolDetails,
 	EvalToolInput,
 	EvalToolRequest,
 } from "./types.ts";
 
-type EvalToolDefinition = ToolDefinition<EvalInputSchema, EvalToolDetails>;
+type EvalToolDefinition = ToolDefinition<EvalInputSchema, EvalResultDetails>;
 type RenderContext = Parameters<NonNullable<EvalToolDefinition["renderCall"]>>[2];
 type ResultRenderContext = Parameters<NonNullable<EvalToolDefinition["renderResult"]>>[3];
 type CollapsibleKind = "code" | "output";
@@ -71,10 +72,15 @@ const TOOL_CALL_COLLAPSED_VISUAL_LINES = 4;
 const TOOL_CALL_COLLAPSED_ERROR_CODE_POINTS = 512;
 const TOOL_ERROR_OMISSION_MARKER = "[tool error omitted]";
 const LIVE_ELAPSED_TICK_MS = 1_000;
+// A live row repaints on every tick, so this many ticks without a render means the row is gone.
+const LIVE_TICKER_MAX_IDLE_TICKS = 60;
 
 class PlainTextComponent implements EvalRenderComponent {
 	#blocks: readonly RenderBlock[] = [];
 	#ticker: ReturnType<typeof setInterval> | undefined;
+	#live = false;
+	#invalidate: (() => void) | undefined;
+	#idleTicks = 0;
 
 	setBlocks(blocks: readonly RenderBlock[]): void {
 		this.#blocks = blocks;
@@ -84,16 +90,19 @@ class PlainTextComponent implements EvalRenderComponent {
 	 * The host only animates tool rows for streaming args, `task`, and results carrying
 	 * `details.progress`; an eval row matches none of them, so nothing repaints it between
 	 * update events. While a cell is non-terminal this drives the repaint itself so the
-	 * header's elapsed time advances, and it emits no tool updates or RPC traffic.
+	 * header's elapsed time advances, and it emits no tool updates or RPC traffic. Detached
+	 * and terminal cards never arm it, and a ticker whose row stopped rendering (transcript
+	 * rebuild, session switch) stops itself after LIVE_TICKER_MAX_IDLE_TICKS and rearms on
+	 * the next render, so dropped rows cannot accumulate intervals.
 	 */
 	syncLiveTicker(isLive: boolean, invalidate: () => void): void {
+		this.#live = isLive;
+		this.#invalidate = invalidate;
 		if (!isLive) {
 			this.stopLiveTicker();
 			return;
 		}
-		if (this.#ticker !== undefined) return;
-		this.#ticker = setInterval(invalidate, LIVE_ELAPSED_TICK_MS);
-		this.#ticker.unref?.();
+		this.#armTicker();
 	}
 
 	stopLiveTicker(): void {
@@ -102,7 +111,24 @@ class PlainTextComponent implements EvalRenderComponent {
 		this.#ticker = undefined;
 	}
 
+	#armTicker(): void {
+		if (this.#ticker !== undefined || this.#invalidate === undefined) return;
+		this.#ticker = setInterval(() => this.#tick(), LIVE_ELAPSED_TICK_MS);
+		this.#ticker.unref?.();
+	}
+
+	#tick(): void {
+		this.#idleTicks += 1;
+		if (this.#idleTicks >= LIVE_TICKER_MAX_IDLE_TICKS) {
+			this.stopLiveTicker();
+			return;
+		}
+		this.#invalidate?.();
+	}
+
 	render(width: number): string[] {
+		this.#idleTicks = 0;
+		if (this.#live) this.#armTicker();
 		const lines: string[] = [];
 		for (const block of this.#blocks) {
 			switch (block.kind) {
@@ -269,13 +295,15 @@ function spinner(frame: number | undefined): string {
 }
 
 function isLiveCellStatus(status: CellStatus): boolean {
-	return status === "pending" || status === "running" || status === "detached";
+	return status === "pending" || status === "running";
 }
 
 function cellPresentation(status: CellStatus, spinnerFrame: number | undefined): StatusPresentation {
 	switch (status) {
 		case "pending":
 			return { label: "pending", icon: "○", color: "muted" };
+		case "queued":
+			return { label: "queued", icon: "○", color: "muted" };
 		case "running":
 			return { label: "running", icon: spinner(spinnerFrame), color: "warning" };
 		case "detached":
@@ -312,6 +340,8 @@ function cellHeader(cell: EvalCellResult, environment: RenderEnvironment, badges
 	const presentation = cellPresentation(cell.status, environment.spinnerFrame);
 	const runtimeBadge = cell.runtime === undefined ? "" : ` (${formatRuntimeBadge(cell.language, cell.runtime)})`;
 	let header = `eval ${cell.language}${runtimeBadge} ${presentation.label} ${presentation.icon}`;
+	if (cell.queuedBehind !== undefined && cell.queuedBehind.length > 0)
+		header += ` · queued behind ${cell.queuedBehind.map(sanitizeTerminalLabel).join(", ")}`;
 	const throughputBadge = badges.throughput === undefined ? undefined : formatThroughputBadge(badges.throughput);
 	if (throughputBadge !== undefined) header += ` · ${throughputBadge}`;
 	const elapsedMs = badges.throughput?.wallDurationMs ?? cellElapsedMs(cell, environment);
@@ -681,7 +711,7 @@ function renderJsonOutputs(values: readonly unknown[], environment: RenderEnviro
 
 function renderDetailedLines(
 	details: EvalToolDetails,
-	result: AgentToolResult<EvalToolDetails>,
+	result: AgentToolResult<EvalResultDetails>,
 	context: DetailedRenderContext,
 ): string[] {
 	const lines: string[] = [];
@@ -740,7 +770,7 @@ function renderDetailedLines(
 	return lines;
 }
 
-function textOutput(result: AgentToolResult<EvalToolDetails>, showImageFallback: boolean): string {
+function textOutput(result: AgentToolResult<EvalResultDetails>, showImageFallback: boolean): string {
 	const lines: string[] = [];
 	for (const part of result.content) {
 		if (part.type === "text") lines.push(part.text);
@@ -752,7 +782,7 @@ function textOutput(result: AgentToolResult<EvalToolDetails>, showImageFallback:
 }
 
 function isEvalRunInput(args: EvalToolRequest): args is EvalToolInput {
-	return args.action !== "peek" && args.action !== "stop";
+	return args.action === undefined || args.action === "run";
 }
 
 function toolCallRows(details: EvalToolDetails | undefined): ToolCallRow[] {
@@ -866,7 +896,8 @@ export function renderEvalCall(
 		return component;
 	}
 	if (!isEvalRunInput(args)) {
-		component.setBlocks([{ kind: "text", text: style(theme, "toolTitle", `eval ${args.action} ${args.cell_id}`) }]);
+		const title = args.action === "list" ? "eval list" : `eval ${args.action} ${args.cell_id}`;
+		component.setBlocks([{ kind: "text", text: style(theme, "toolTitle", title) }]);
 		return component;
 	}
 	if (theme === undefined && context.spinnerFrame === undefined) {
@@ -917,13 +948,21 @@ export function renderEvalCall(
 }
 
 export function renderEvalResult(
-	result: AgentToolResult<EvalToolDetails>,
+	result: AgentToolResult<EvalResultDetails>,
 	options: ToolRenderResultOptions,
 	theme: Theme | undefined,
 	context: ResultRenderContext,
 ): EvalRenderComponent {
 	const component = componentFor(context);
 	const details = result.details;
+	if (details && "action" in details) {
+		component.syncLiveTicker(false, context.invalidate);
+		component.setBlocks([
+			{ kind: "text", text: style(theme, "toolTitle", "eval list") },
+			{ kind: "text", text: style(theme, "toolOutput", textOutput(result, false)) },
+		]);
+		return component;
+	}
 	const expanded = options.expanded || context.expanded;
 	const imageProtocol = context.imageProtocol ?? null;
 	component.syncLiveTicker(hasLiveCell(details), context.invalidate);

@@ -96,6 +96,23 @@ export function storedBindingFromBinding(
 	};
 }
 
+/**
+ * Reason carried by the newest binding ledger record, when that record is an
+ * invalidation. A marker appended later retires it: the marker means a turn
+ * re-established the binding, so no cause is pending any more.
+ */
+export function invalidationReasonFromBranch(branch: readonly BranchEntry[]): string | undefined {
+	const index = newestBindingEntryIndex(branch);
+	if (index < 0) return undefined;
+	const data = branch[index]?.data;
+	return isBindingInvalidation(data) ? data.reason : undefined;
+}
+
+function isBindingInvalidation(value: unknown): value is BindingInvalidation {
+	if (typeof value !== "object" || value === null) return false;
+	return "invalidated" in value && value.invalidated === true && "reason" in value && typeof value.reason === "string";
+}
+
 export function bindingFromStoredBranch(
 	branch: readonly BranchEntry[],
 	stored: StoredBinding,
@@ -103,37 +120,53 @@ export function bindingFromStoredBranch(
 	const markerIndex = newestBindingEntryIndex(branch);
 	if (markerIndex < 0) return undefined;
 	const marker = branch[markerIndex];
-	if (
-		marker?.id !== stored.markerEntryId ||
-		!isBindingMarker(marker.data) ||
-		!branch.slice(markerIndex + 2).every(isSafeBindingSuffix)
-	) {
-		return undefined;
-	}
-	const committedAssistant = branch[markerIndex + 1]?.message;
+	if (marker?.id !== stored.markerEntryId || !isBindingMarker(marker.data)) return undefined;
+	const assistantIndex = committedAssistantIndex(branch, markerIndex + 1);
+	if (assistantIndex < 0 || !branch.slice(assistantIndex + 1).every(isLedgerOnlyEntry)) return undefined;
+	const committedAssistant = branch[assistantIndex]?.message;
 	if (!isAssistantMessage(committedAssistant)) return undefined;
 	if (assistantContentHash(committedAssistant) !== stored.assistantContentHash) return undefined;
 	return bindingFromStored(stored);
 }
 
 /**
- * Display-only metadata the co-resident builtins append after the committed
- * assistant (stop-hook state/diagnostics/output, rule activations, rule scans).
- * None participates in the sent stream, so none can shift the prefix digest.
+ * The marker is appended inside `message_end`, so handlers that run after this
+ * builtin (and extensions loaded later) can append ledger entries before the
+ * assistant itself persists. The committed assistant is the first message after
+ * the marker; anything that reaches the model in between fails closed.
  */
-const SAFE_BINDING_SUFFIX_TYPES: ReadonlySet<string> = new Set([
-	"senpi.hooks.stop-state",
-	"senpi.hooks.stop-diagnostics",
-	"senpi.hooks.stop-output",
-	"pi-rules.scan",
-	"rule-activation",
-	"goal-cache-warmup",
+function committedAssistantIndex(branch: readonly BranchEntry[], from: number): number {
+	for (let index = from; index < branch.length; index += 1) {
+		const entry = branch[index];
+		if (entry?.type === "message") return index;
+		if (!entry || !isLedgerOnlyEntry(entry)) return -1;
+	}
+	return -1;
+}
+
+/**
+ * Entry types the session-manager never projects into the LLM context. They
+ * cannot shift the sent-stream digest the binding is verified against, so any
+ * `custom` ledger record (hook state, rule scans, memory bookkeeping, ...) is
+ * admitted regardless of who wrote it. Everything the model can see - messages,
+ * custom messages other than the goal continuation, compaction and branch
+ * summaries - keeps failing closed (oh-my-openagent#7925).
+ */
+const LEDGER_ONLY_ENTRY_TYPES: ReadonlySet<string> = new Set([
+	"custom",
+	"label",
+	"session_info",
+	"thinking_level_change",
+	"model_change",
+	// A refused switch (#1526) is bookkeeping the model never sees; omitting it
+	// here made recording the refusal destroy the stored binding on resume.
+	"model_change_rejected",
+	"configuration_update",
 ]);
 
-function isSafeBindingSuffix(entry: BranchEntry): boolean {
-	if (entry.type === "label") return true;
+function isLedgerOnlyEntry(entry: BranchEntry): boolean {
 	if (entry.type === "custom_message") return entry.customType === GOAL_CONTINUATION_MESSAGE_TYPE;
-	return entry.type === "custom" && entry.customType !== undefined && SAFE_BINDING_SUFFIX_TYPES.has(entry.customType);
+	return LEDGER_ONLY_ENTRY_TYPES.has(entry.type);
 }
 
 function newestBindingEntryIndex(branch: readonly BranchEntry[]): number {

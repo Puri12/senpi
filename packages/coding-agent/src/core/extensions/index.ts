@@ -155,8 +155,12 @@ export type {
 	SessionBeforeTreeResult,
 	SessionCompactEvent,
 	SessionCompactFailedEvent,
+	SessionContext,
 	SessionEvent,
 	SessionInfoChangedEvent,
+	SessionKind,
+	SessionParkedEvent,
+	SessionResumedEvent,
 	SessionShutdownEvent,
 	// Events - Session
 	SessionStartEvent,
@@ -199,6 +203,7 @@ export type {
 // Type guards
 export {
 	defineTool,
+	EMPTY_SESSION_CONTEXT,
 	ExecuteToolError,
 	isBashToolResult,
 	isEditToolResult,

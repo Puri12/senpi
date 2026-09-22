@@ -3,9 +3,11 @@ import { getAgentDir } from "../../../../config.ts";
 import { AuthStorage } from "../../../auth-storage.ts";
 import type { ExtensionAPI, ProviderModelConfig } from "../../types.ts";
 import { registerCursorCliAccountCommand } from "./account-command.ts";
+import { refreshCursorCliModelCatalogForLane } from "./catalog-refresh.ts";
 import { defaultCursorAgentExecutableDeps, resolveCursorAgentExecutable } from "./executable.ts";
 import { cursorCliForceRefusalPending } from "./guardrails.ts";
-import { resolveCursorCliModelCatalog, STATIC_CURSOR_CLI_MODELS } from "./models.ts";
+import { STATIC_CURSOR_CLI_MODELS } from "./models.ts";
+import type { CursorCliModelProbe } from "./models-probe.ts";
 import { createCursorCliOauthCredentialReader } from "./native-bootstrap.ts";
 import { CURSOR_CLI_OAUTH_PROVIDER_ID, createCursorCliOauthConfig } from "./oauth-login.ts";
 import {
@@ -28,6 +30,7 @@ export type CursorCliOauthExtensionDeps = {
 	readonly readNativeCredential?: () => Credential | undefined | Promise<Credential | undefined>;
 	readonly loadSettings?: (cwd: string) => CursorCliOauthProviderSettings;
 	readonly resolveExecutable?: (settings: { executablePath?: string }) => string;
+	readonly runModelsProbe?: CursorCliModelProbe;
 };
 
 const defaultResolveExecutable = (settings: { executablePath?: string }): string =>
@@ -97,18 +100,18 @@ export function registerCursorCliOauthExtension(pi: ExtensionAPI, deps: CursorCl
 
 	// Register immediately with the offline fallback so a missing, hanging, or
 	// broken cursor-agent can never delay or block provider registration; the
-	// probe-backed catalog replaces it once resolved.
+	// probe-backed catalog replaces it once resolved. The probe itself runs only
+	// when the lane is usable, inside the account HOME (senpi#1722).
 	register(STATIC_CURSOR_CLI_MODELS);
-	const settings = loadSettings(cwd);
-	void resolveCursorCliModelCatalog({
+	void refreshCursorCliModelCatalogForLane({
 		agentDir,
-		settings: {
-			modelCatalogTtlHours: settings.modelCatalogTtlHours,
-			executablePath: settings.executablePath,
-		},
-		deps: { resolveExecutable: () => resolveExecutable({ executablePath: settings.executablePath }) },
+		settings: loadSettings(cwd),
+		readCurrent,
+		resolveExecutable,
+		...(deps.runModelsProbe === undefined ? {} : { runProbe: deps.runModelsProbe }),
 	})
 		.then((models) => {
+			if (models === undefined) return;
 			const resolved = models.map((entry) => entry.id).join("\n");
 			if (resolved !== STATIC_CURSOR_CLI_MODELS.map((entry) => entry.id).join("\n")) register(models);
 		})

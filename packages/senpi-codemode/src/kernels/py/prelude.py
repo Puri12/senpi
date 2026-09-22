@@ -23,11 +23,10 @@ import uuid
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from threading import Lock
-from typing import Any, Callable
+from threading import Lock, Thread
+from typing import Any, Callable, Union
 from urllib.parse import unquote
 
-SESSION_ID = ""
 CONNECTION: dict[str, Any] = {}
 USER_NS: dict[str, Any] = {"__name__": "__main__", "__doc__": None, "__builtins__": __builtins__}
 LOOP = asyncio.new_event_loop()
@@ -43,7 +42,11 @@ TIMEOUT_RESUME_OP = "timeout-resume"
 
 
 class PreludeRuntimeError(RuntimeError):
-    """Host bridge or magic execution failed."""
+    """Host bridge or magic execution failed, retaining its machine code."""
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class PreludeValueError(ValueError):
@@ -370,7 +373,7 @@ def bridge_post(path: str, payload: dict[str, Any]) -> Any:
         return body.get("value")
     error = body.get("error") if isinstance(body, dict) else body
     if isinstance(error, dict):
-        raise PreludeRuntimeError(str(error.get("message", error)))
+        raise PreludeRuntimeError(str(error.get("message", error)), error.get("code"))
     raise PreludeRuntimeError(str(error))
 
 
@@ -415,6 +418,54 @@ class ToolProxy:
 
 
 tool = ToolProxy()
+
+JsonValue = Union[str, int, float, bool, None, list["JsonValue"], dict[str, "JsonValue"]]
+
+
+def _workpool_call(args: dict[str, JsonValue]) -> dict[str, JsonValue]:
+    try:
+        return tool.workpool(args)
+    except PreludeRuntimeError as error:
+        if error.code in ("unknown_tool", "inactive_tool"):
+            raise PreludeRuntimeError("No active host workpool tool", "workpool_unavailable") from error
+        raise
+
+
+class Workpool:
+    """An opaque host identity, not a worker queue."""
+
+    __slots__ = ("pool_id",)
+
+    def __init__(self, pool_id: str) -> None:
+        self.pool_id = pool_id
+
+    def push(self, items: list[JsonValue]) -> dict[str, JsonValue]:
+        return _workpool_call({"op": "push", "pool_id": self.pool_id, "items": items})
+
+    def close(self) -> dict[str, JsonValue]:
+        return _workpool_call({"op": "close", "pool_id": self.pool_id})
+
+    def inspect(self) -> dict[str, JsonValue]:
+        return _workpool_call({"op": "inspect", "pool_id": self.pool_id})
+
+    def cancel(self) -> dict[str, JsonValue]:
+        return _workpool_call({"op": "cancel", "pool_id": self.pool_id})
+
+
+def workpool(agent: dict[str, JsonValue], name: str, *, mode: str | None = None) -> Workpool:
+    args: dict[str, JsonValue] = {"op": "create", "agent": agent, "name": name}
+    if mode is not None:
+        args["mode"] = mode
+    result = _workpool_call(args)
+    details = result.get("details")
+    if isinstance(details, dict):
+        error = details.get("error")
+        if isinstance(error, dict):
+            raise PreludeRuntimeError(str(error["message"]), str(error["code"]))
+        pool_id = details.get("pool_id")
+        if not result.get("hasError") and isinstance(pool_id, str) and re.fullmatch(r"wp_[0-9a-f]{32}", pool_id):
+            return Workpool(pool_id)
+    raise PreludeRuntimeError("Host did not return a workpool identity", "workpool_unavailable")
 
 
 def completion(
@@ -478,9 +529,15 @@ def agent(
     schema: dict[str, Any] | None = None,
     isolated: bool | None = None,
     apply: bool | None = None,
-    merge: bool | None = None,
+    merge: bool | str | None = None,
     handle: bool = False,
 ) -> Any:
+    """Delegate work; isolated/apply/merge need a host that supports isolation, otherwise a warning.
+
+    merge accepts "patch"/"branch" or False/True respectively. Unapplied foreground
+    changes raise an error with recovery instructions. A handle returns immediately;
+    await the completion notification or read task_output for the isolation result.
+    """
     args: dict[str, Any] = {"prompt": prompt}
     if agent is not None:
         args["agent"] = agent
@@ -495,7 +552,7 @@ def agent(
     if apply is not None:
         args["apply"] = bool(apply)
     if merge is not None:
-        args["merge"] = bool(merge)
+        args["merge"] = merge
     if handle:
         args["handle"] = True
 
@@ -522,10 +579,14 @@ def agent(
         "output": text_value,
         "handle": handle_value,
         "id": agent_id,
+        "run_epoch": response_record.get("run_epoch"),
         "agent": response_record.get("agent", agent),
     }
     if schema is not None:
         node["data"] = parsed
+    details = response_record.get("details")
+    if isinstance(details, dict) and "isolation" in details:
+        node["details"] = {"isolation": details["isolation"]}
     for key in (
         "isolated",
         "patch_path",
@@ -917,6 +978,7 @@ USER_NS.update(
         "tool": tool,
         "completion": completion,
         "agent": agent,
+        "workpool": workpool,
         "output": output,
         "tool_schema": tool_schema,
         "__senpi_magic": _magic,
@@ -1002,10 +1064,9 @@ def elapsed(start: float) -> int:
 
 
 def handle(message: dict[str, Any]) -> bool:
-    global SESSION_ID, CONNECTION
+    global CONNECTION
     message_type = message.get("type")
     if message_type == "init":
-        SESSION_ID = str(message.get("sessionId", ""))
         connection = message.get("connection")
         if not isinstance(connection, dict):
             emit({"type": "init-failed", "error": {"message": "missing bridge connection"}})
@@ -1022,14 +1083,71 @@ def handle(message: dict[str, Any]) -> bool:
     return True
 
 
+def _terminate_process_group() -> None:
+    # The kernel is spawned into its own session (setsid), so its pid is its process
+    # group id and a cell's subprocesses inherit that group. Killing the group takes
+    # those children down with the kernel instead of orphaning them to init.
+    if os.name != "posix":
+        return
+    with contextlib.suppress(OSError):
+        os.killpg(os.getpgrp(), signal.SIGKILL)
+
+
+def _watch_parent(initial_ppid: int) -> None:
+    # A cell blocked in the main thread (for example a multiprocessing pool) never
+    # returns to the stdin loop, so it cannot notice the host closing its pipe. This
+    # daemon thread notices the reparenting instead and takes the whole group down.
+    while True:
+        time.sleep(1.0)
+        if os.getppid() != initial_ppid:
+            _terminate_process_group()
+            return
+
+
+def _watch_named_parent(parent_pid: int) -> None:
+    # The ppid watch above can only observe a change from the ppid captured at boot. A
+    # host that died before the interpreter reached that capture is already replaced in
+    # getppid() by the posthumous value, so no transition ever fires. The host passes its
+    # own pid at spawn (SENPI_PY_KERNEL_PARENT_PID) precisely so this loss is detectable:
+    # poll the named pid instead of the ppid and take the whole group down once it is gone.
+    while True:
+        time.sleep(0.5)
+        try:
+            os.kill(parent_pid, 0)
+        except ProcessLookupError:
+            _terminate_process_group()
+            return
+
+
+def _start_parent_watch() -> None:
+    if os.name != "posix":
+        return
+    Thread(target=_watch_parent, args=(os.getppid(),), name="senpi-parent-watch", daemon=True).start()
+    named_parent = os.environ.get("SENPI_PY_KERNEL_PARENT_PID")
+    if named_parent and named_parent.isdigit():
+        Thread(
+            target=_watch_named_parent,
+            args=(int(named_parent),),
+            name="senpi-named-parent-watch",
+            daemon=True,
+        ).start()
+
+
 def main() -> None:
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _start_parent_watch()
+    host_closed = False
     for raw in sys.stdin:
         try:
             if not handle(json.loads(raw)):
+                host_closed = True
                 break
         except BaseException as exc:  # noqa: BROAD_EXCEPT_OK — process boundary serializes malformed input and interrupts.
             emit({"type": "init-failed", "error": bridge_error(exc)})
+    # Reaching here without a close frame means the host's pipe hit EOF: it is gone,
+    # so retire any subprocess the last cell left running before the interpreter exits.
+    if not host_closed:
+        _terminate_process_group()
 
 
 if __name__ == "__main__":

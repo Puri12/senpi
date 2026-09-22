@@ -1,3 +1,328 @@
+## 2026-09-21 - Migrate the test runner to Vitest 5 (senpi#1895)
+
+### What changed
+
+- `packages/ai/package.json`: Updated the test runner to Vitest 5.0.1.
+
+### Why
+
+- Run this workspace on the pinned Vitest 5 release.
+
+### Why an extension could not handle it
+
+- The package manager resolves development tools before extensions load.
+
+### Expected merge conflict zones
+
+- The development dependency pins in `packages/ai/package.json`.
+
+## 2026-09-20 - The image-model generator formats what it writes (senpi#1886)
+
+### What changed
+
+- `packages/ai/scripts/generate-image-models.ts` hands the file it just wrote to Biome
+  (`biome check --write`) before reporting success, resolving the binary from the
+  repository's own `node_modules/.bin` and falling back to `biome` on PATH.
+
+### Why
+
+- The serializer writes tabs by hand and uses `JSON.stringify` for `input`, `output` and
+  `cost`, which emits `["text","image"]`, quoted keys and two-space indentation. Biome wants
+  `["text", "image"]`, unquoted keys and tabs, so the emitted file never satisfied
+  `npm run check`. The shared `check` script used to run `biome check --write`, which
+  rewrote the file silently; #1443 made that gate read-only, and the release job is the first
+  thing that regenerates the catalog under the strict gate. Run 35520504862 failed at
+  `[release] error: npm run check failed` with the version already applied to 10 manifests,
+  so no release can complete until the generator's output is clean on its own.
+- Formatting through Biome rather than hand-matching its current style keeps a future Biome
+  upgrade from reintroducing the same drift.
+
+### Why an extension could not handle it
+
+- This is a build-time code generator invoked by `scripts/release-artifacts.mjs`; it runs
+  before any session exists and no extension surface participates in catalog generation.
+
+### Expected merge conflict zones
+
+- `packages/ai/scripts/generate-image-models.ts`: the import block and `main()`. Upstream
+  edits to this generator touch the same `writeFileSync` tail.
+
+## 2026-09-21 - Refresh the provider SDK pins (senpi#1895)
+
+### What changed
+
+- `packages/ai/package.json`: `@anthropic-ai/sdk` 0.123.0 -> 0.127.0, `@aws-sdk/client-bedrock-runtime` 3.1127.0 -> 3.1136.0, `@google/genai` 2.21.0 -> 2.23.0, `@bufbuild/protobuf` 2.14.0 -> 2.15.0, `@smithy/types` 4.17.2 -> 4.18.0, `typebox` 1.3.27 -> 1.3.34, `yaml` 2.9.0 -> 2.9.1 and `@types/node` 26.2.0 -> 26.6.2.
+
+### Why
+
+- The provider SDKs are fork-owned exact pins and the surface this package is built on; each moves to the newest release in the same minor that satisfies `min-release-age=2`. The `@anthropic-ai/sdk` line in the 2026-08-21 entry below ("stays at 0.91.1") is historical: the browser-bundle blocker it records is handled by the `anthropic-sdk-node-builtins` plugin in `scripts/check-browser-smoke.mjs`.
+
+### Why an extension could not handle it
+
+- Manifest dependency versions are resolved by the package manager before any extension loads.
+
+### Expected merge conflict zones
+
+- LOW: the dependency version block, on every upstream release bump.
+
+## 2026-09-18 - The catalog check tolerates a shard the aggregator no longer lists
+
+### What changed
+
+- `packages/ai/scripts/model-data.ts` excludes a shard a provider module imports from the
+  aggregator/shard equality check, the way it already excludes a fork-owned shard.
+- `packages/ai/test/model-data-imported-shard.test.ts` stages the committed catalog, drops
+  `kimi-coding` from the aggregator and requires `readModelDataStructure` not to throw.
+
+### Why
+
+- With the prune guard in place the shard survives a run that wrote none of them, but the freshly
+  written aggregator no longer lists it, so `readModelDataStructure` called it an extra shard and the
+  release failed a third time - after the prune failure it was meant to replace.
+
+### Why an extension could not handle it
+
+- The equality check is the generator's own consistency gate; only it knows which shards the run wrote.
+
+### Expected merge conflict zones
+
+- `packages/ai/scripts/model-data.ts` around `readModelDataStructure`'s shard comparison.
+
+## 2026-09-18 - Never prune a model shard a provider module imports
+
+### What changed
+
+- `packages/ai/scripts/model-shards.ts` gains `importedModelShards` and a third argument to
+  `isPrunableModelShard`: a shard a committed provider module imports is never prunable, whoever was
+  supposed to write it. `FORK_OWNED_MODEL_SHARDS` stays for shards no module imports.
+- `packages/ai/scripts/generate-models.ts` reads the provider modules beside the shards and passes the
+  imported set to the prune, so a provider models.dev has stopped describing keeps its catalog.
+- `packages/ai/test/model-shards.test.ts` adds the fresh-generation case: every imported shard survives a
+  run that wrote none of them. It fails without the guard.
+
+### Why
+
+- The release job regenerates catalogs before type-checking. models.dev no longer describes `kimi-coding`,
+  so the prune deleted `packages/ai/src/providers/kimi-coding.models.ts` while
+  `packages/ai/src/providers/kimi-coding.ts` still imported it, and two consecutive releases died on
+  `TS2307` with fifteen cascades. Ordinary CI type-checks the committed catalog instead of regenerating
+  it, and the existing ownership test compares against that same committed aggregator, so only the release
+  job could see it.
+
+### Why an extension could not handle it
+
+- The prune happens inside the generator's own write-and-sweep pass. Nothing outside it knows which shards
+  the run produced, so the decision to keep a shard has to be made where that set exists.
+
+### Expected merge conflict zones
+
+- `packages/ai/scripts/model-shards.ts` around `isPrunableModelShard`, and the prune loop in
+  `packages/ai/scripts/generate-models.ts`, if upstream reshapes the shard sweep.
+
+## 2026-09-18 - Generate the official B.AI chat catalog
+
+### What changed
+
+- `packages/ai/scripts/bai-models.json` records B.AI's published standard context, output, modality,
+  reasoning-level, and pricing metadata for the 56 chat models B.AI documents as active, sourced from each
+  `docs.b.ai/llmservice/models/<slug>/` page and the standard pricing table. Promotional, DeepSeek idle, and
+  long-cache rates are deliberately excluded.
+- `packages/ai/scripts/generate-models-bai.ts` converts that source into provider models with family-specific
+  API selection and B.AI endpoint shapes.
+- `packages/ai/scripts/generate-models.ts` adds the curated B.AI rows before the shared normalization and
+  generated-shard pipeline.
+- Regenerated `packages/ai/src/providers/data/bai.json`, `bai.models.ts`, `models.generated.ts`, and the model
+  data manifest. Image-only `gpt-image-2` is intentionally absent from the chat catalog.
+- `packages/ai/test/gpt-6-astra-context-window.test.ts` includes the B.AI shard in the cross-provider Astra
+  context-window invariant.
+- `packages/ai/scripts/generate-models.ts` re-derives `reasoning` for B.AI models after the shared
+  thinking-level passes, so a model that gains a selectable level cannot keep `reasoning: false` and silently
+  lose its reasoning payload at request time.
+
+### Why
+
+- B.AI `/v1/models` is credential-scoped and returns IDs only. The committed generated catalog is the
+  maintainable source for model capabilities and standard reference prices, while runtime discovery decides
+  which classified IDs the current key may use.
+
+### Why an extension could not handle it
+
+- Catalog generation and validation run before extensions load and feed every built-in provider consumer.
+
+### Expected merge conflict zones
+
+- LOW: one import and one append in `packages/ai/scripts/generate-models.ts`.
+- NONE: the B.AI generator source and metadata file are new fork-owned files.
+
+## 2026-09-13 - Publish static provider module subpaths
+
+### What changed
+
+- `packages/ai/package.json` exports `./cursor-agent-provider` and `./devin-provider` from the built distribution, alongside `./bedrock-provider`.
+
+### Why
+
+- Standalone Bun consumers need static imports that also resolve from the published layout without exposing Node-only transports through the browser-safe root.
+
+### Why an extension could not handle it
+
+- `packages/ai/package.json` controls package resolution before extensions execute.
+
+### Expected merge conflict zones
+
+- `packages/ai/package.json` public exports block.
+
+## 2026-09-12 - Fork-owned model catalog shards survive generation
+
+### What changed
+
+- `packages/ai/scripts/model-shards.ts` (new) owns shard ownership: `FORK_OWNED_MODEL_SHARDS` lists the `*.models.ts` catalogs the fork maintains by hand (currently `devin.models.ts`), and `isPrunableModelShard` decides deletion.
+- `packages/ai/scripts/generate-models.ts` prunes through that predicate instead of deleting every shard the current run did not write.
+- `packages/ai/scripts/model-data.ts` excludes fork-owned shards when it compares the shard directory against the aggregator's provider imports.
+- `packages/ai/test/model-shards.test.ts` derives the expected fork-owned set from the tree - the shards providers import minus the shards `src/models.generated.ts` imports - so a new hand-authored provider fails this test instead of the release.
+
+### Why
+
+- models.dev has no `devin` provider, so `devin.models.ts` is hand-authored and the aggregator never imports it. The release job regenerates the catalog before typechecking, so generation deleted the shard and `tsc` failed with `Cannot find module './devin.models.ts'` (run 34621164006), and `check:model-data` already failed on the committed tree for the same reason. Ordinary CI typechecks the committed catalog, so neither failure is visible outside the release path.
+
+### Why an extension could not handle it
+
+- Catalog generation and its validation are build-time scripts that run long before any extension loads.
+
+### Expected merge conflict zones
+
+- LOW: the shard prune loop in `generate-models.ts` and the shard comparison in `readModelDataStructure`.
+
+## 2026-09-10 - Venice AI catalog generation
+
+### What changed
+
+- `packages/ai/scripts/generate-models.ts` adds a Venice AI fetcher over the models.dev `venice` catalog (`VENICE_BASE_URL`, `VENICE_COMPAT`), emitting `openai-completions` models at `https://api.venice.ai/api/v1` under provider id `venice`. It honors the shared `tool_call !== true` and `status === "deprecated"` skips and routes reasoning metadata through `recordModelsDevReasoningOptions`, so Venice's `reasoning_effort` ladder is derived from models.dev rather than hardcoded.
+- Every generated Venice model carries `compat.veniceParameters = { include_venice_system_prompt: false }`.
+
+### Why
+
+- Venice was the one provider a user asked for that had no representation anywhere in `packages/ai`. models.dev already publishes the catalog, so generation is the maintainable source; the generated ids were cross-checked against Venice's live `GET /models` listing and all 104 exist.
+- Venice prepends its own default system prompt unless `include_venice_system_prompt` is false, which would place a second system prompt ahead of the agent's.
+
+### Why an extension could not handle it
+
+- The committed model catalog is a build-time artifact consumed by the provider registry before any extension loads.
+
+### Expected merge conflict zones
+
+- LOW: the models.dev provider block ordering in `loadModelsDevData()` when upstream adds its own provider fetchers nearby.
+
+## 2026-09-10 - Image input token rate in the static OpenAI image catalog
+
+## 2026-09-10 - Use native TypeScript builds for omob performance
+
+### What changed
+
+- packages/ai/package.json: build uses tsgo for the emitted workspace build.
+
+### Why
+
+- The native compiler reduces omob build time without changing runtime JavaScript.
+
+### Why this lives in the fork
+
+- The package build manifest owns the compiler used by the fork's release pipeline.
+
+### Expected merge conflict zones
+
+- The `build` script in packages/ai/package.json.
+
+### What changed
+
+- `packages/ai/scripts/generate-image-models.ts`: `OPENAI_IMAGE_MODELS` entries for `gpt-image-2.5-sunburst`, `gpt-image-2.5-flare`, and `gpt-image-2` carry `imageInput: 8` (USD per million image input tokens), regenerated into `packages/ai/src/image-models.generated.ts` with `--strict`; the OpenRouter block is unchanged.
+
+### Why
+
+- OpenAI bills image inputs (references, edit targets, masks) at $8/M against $5/M for text, so a single `input` rate under-reported every edit request.
+
+### Why an extension could not handle it
+
+- The builtin image catalog is generated data loaded before any extension runs.
+
+### Expected merge conflict zones
+
+- LOW: the `OPENAI_IMAGE_MODELS` array and its comment block.
+
+## 2026-09-09 - GPT Image 2.5 entries in the static OpenAI image catalog
+
+### What changed
+
+- `packages/ai/scripts/generate-image-models.ts`: `OPENAI_IMAGE_MODELS` gains `gpt-image-2.5-sunburst` and `gpt-image-2.5-flare` (released 2026-09-08) ahead of the existing entries, with $5 input / $30 output / $1.25 cached-input per million tokens, and every GPT Image entry that the edits endpoint accepts now advertises `["text", "image"]` inputs. The regenerated OpenAI block lives in `packages/ai/src/image-models.generated.ts`; the OpenRouter block is untouched.
+
+### Why
+
+- OpenAI's own API exposes no image-model catalog to fetch, so the static generator entries are the only place the new model ids and their pricing can enter the builtin registry.
+
+### Why an extension could not handle it
+
+- The builtin image catalog is generated data loaded before any extension runs; an extension can add a provider but cannot amend the `openai` provider's shipped model list.
+
+### Expected merge conflict zones
+
+- LOW: the `OPENAI_IMAGE_MODELS` array and its comment block in the generator.
+
+## 2026-09-07 - One context window for the whole GPT-6 Astra series
+
+### What changed
+
+- `packages/ai/scripts/generate-models.ts`: `GPT_6_ASTRA_DEFAULT_CONTEXT_WINDOW` is 600,000, and the new `applyGpt6AstraContextWindow` stamps it onto every model whose id carries `gpt-6-astra` in the final metadata pass, after `applyOpenAiInputCap` and before provider grouping. Regenerated `packages/ai/src/providers/data/` (13 Astra rows across azure-openai-responses, github-copilot, openai-codex, openai, opencode, openrouter and vercel-ai-gateway) plus `packages/ai/src/providers/data/.manifest.json`.
+- `packages/ai/test/gpt-6-astra-context-window.test.ts` walks every generated catalog and requires the whole series to agree; `gpt-6-astra-catalog.test.ts`, `openai-fast-models.test.ts` and `openai-input-cap-catalog.test.ts` move their Astra expectations to the series value.
+
+### Why
+
+- `contextWindow` is the prompt budget senpi gates on, and the Astra series had no budget of its own: it inherited whatever the input-cap pass produced, so the model's usable window was a side effect of the provider that served it. A single series default makes the budget the same on every route, and users who want a wider or narrower one still set it through model overrides.
+
+### Why an extension could not handle it
+
+- Catalog data is loaded before any extension runs, so only the generator can change what every consumer of `contextWindow` sees.
+
+### Expected merge conflict zones
+
+- LOW: the OpenAI flagship constants block and the final `for (const model of allModels)` metadata pass in the generator.
+
+## 2026-09-07 - OpenAI input cap applied on every provider (#1422 follow-up)
+
+### What changed
+
+- `packages/ai/scripts/generate-models.ts`: `applyOpenAiInputCap` runs in the final metadata pass over every provider's GPT-5.x / GPT-6 rows (`isOpenAiFlagshipFamilyId` strips the `openai/`, `openai.`, `global.openai.` gateway prefixes and excludes `gpt-oss`), mapping the 400,000 / 1,050,000 totals to 272,000 / 922,000 when `maxTokens` is 128,000, and correcting `gpt-5-pro`'s mirrored 272,000 max output to 128,000 before the mapping. The earlier `provider === "openai"`-only call and the openai-only `gpt-5-pro` fix are folded into it. Regenerated `packages/ai/src/providers/data/` (128 rows across bedrock, azure, cloudflare, copilot, openai, opencode, opencode-go, opengateway, openrouter, vercel) plus `packages/ai/src/providers/data/.manifest.json`.
+- `packages/ai/test/openai-input-cap-catalog.test.ts` pins the invariant for the whole builtin catalog.
+
+### Why
+
+- The input/output split is a property of the model, not of the gateway: OpenRouter, Vercel, OpenGateway, Copilot and the cloud hosts forward the same upstream rejection, so luna/terra/sol/astra rows on those providers still let a session run 128k tokens past the point where the provider rejects the prompt.
+
+### Why an extension could not handle it
+
+- Catalog data is loaded before any extension runs; only the generator can change what every consumer of `contextWindow` sees.
+
+### Expected merge conflict zones
+
+- LOW: the final `for (const model of allModels)` metadata pass and the OpenAI constants block in the generator.
+
+## 2026-09-07 - OpenAI catalog contextWindow stores the documented input cap (#1422)
+
+### What changed
+
+- `packages/ai/scripts/generate-models.ts`: `toOpenAiInputCap` maps the documented OpenAI window tiers to their prompt budgets for provider `openai` (400,000 -> 272,000; 1,050,000 -> 922,000 when `maxTokens` is 128,000), `GPT_6_ASTRA_DEFAULT_CONTEXT_WINDOW` and the Azure flagship overrides use the 922,000 cap. Regenerated `packages/ai/src/providers/data/openai.json`, `packages/ai/src/providers/data/openai-codex.json`, `packages/ai/src/providers/data/azure-openai-responses.json`, `packages/ai/src/providers/data/.manifest.json` (the same run picked up one OpenRouter price refresh).
+
+### Why
+
+- The Responses API rejects a request with `context_too_large` once the prompt alone exceeds window minus max output, regardless of `max_output_tokens`. senpi uses `contextWindow` as the prompt budget everywhere (compaction gates, usage meter, output clamp), so the totals put every gate above the point where the provider already rejects. The catalog already used the input-cap convention for gpt-5.4/5.5/5.6 (272,000); the flagship rows were the inconsistent ones.
+
+### Why an extension could not handle it
+
+- The catalog generator and its committed data are the source of every model's `contextWindow`; no extension hook runs before the catalog is loaded.
+
+### Expected merge conflict zones
+
+- LOW: the OpenAI normalization block and the flagship constants in the generator.
+
 # 2026-09-05 - GPT-6 Astra async tool calling and WebSocket steering: deferred with design
 
 ### What changed
@@ -1077,3 +1402,23 @@ These failures are in upstream `packages/ai` live integration tests, not in the 
 ### Expected merge conflict zones
 
 - Generated ZAI provider catalog entries and the model generator's reference-cost selection.
+
+## 2026-09-12 - Upstream sync (upstream/main@71dca871) integration repairs
+
+### What changed
+
+- `packages/ai/package.json`: fork CalVer `2026.9.12` and `private: true`; held pins `openai 6.26.0` and `@anthropic-ai/sdk 0.123.0` instead of upstream's `6.40.0`/`0.124.0`; fork-only runtime deps `@bufbuild/protobuf`, `@smithy/types`, `yaml`; the `./auth/pool/*` and `./node/provider-scope` export subpaths; `tsx`-driven generator scripts, a `build` that does not regenerate models, `build:offline`/`dev`/`dev:tsc`, Node `>=24.0.0`, `@types/node 26.2.0`, `vitest 4.1.11`. Upstream's `typebox 1.3.27` and the rest of the D-Q bumps were adopted.
+- `packages/ai/scripts/generate-models.ts`: the fork generator with its overlays (Venice, OpenGateway, Kimi coding stable rows, ZAI GLM-5.2 and Kimi K3 thinking maps, xAI thinking maps, Bedrock strict-mode ids, OpenAI priority-tier and Codex `additional_tools` sets, GPT-6 Astra 600k context, documented OpenAI input caps applied after context windows, `isPrunableModelShard` shard pruning, OpenRouter reasoning metadata) plus upstream's new provider metadata handling (DeepSeek Flash, Fireworks, Mistral GLM-5.2, OpenRouter affinity, Codex Off effort, GPT-5.4 Codex retirement, OpenCode header).
+
+### Why
+
+- The fork publishes its own catalog (extra providers, seven thinking levels, Astra context sizing, fast/priority clones) from upstream's model data; the generator is where those overlays live, and the manifest carries the fork's held SDK pins and export map.
+
+### Why an extension could not handle it
+
+- Catalog generation runs at build time and the manifest's exports/pins are resolved by the package manager; neither is reachable from runtime extension hooks.
+
+### Expected merge conflict zones
+
+- HIGH: `packages/ai/scripts/generate-models.ts` provider blocks (OpenAI, xAI, Fireworks, Mistral, OpenRouter) whenever upstream reshapes a provider's metadata.
+- MEDIUM: `packages/ai/package.json` `dependencies` and `exports` on every upstream dependency bump.

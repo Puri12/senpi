@@ -116,9 +116,10 @@ describe("claude-sdk-oauth config fingerprint stability", () => {
 		expect(withDifferentCallbackIdentity.toolsetHash).toBe(policyProbe.toolsetHash);
 	});
 
-	it("cold-seeds a restart binding persisted under an older host-tool policy version", () => {
-		// The sidecar stores toolsetHash; after a policy bump the first admission
-		// must not resume the pre-bump SDK session (its hooks carried the old reason).
+	it("reattaches a restart binding persisted under an older host-tool policy version", () => {
+		// A restart has no live query: resume builds a fresh query carrying the
+		// CURRENT hooks and options, so the pre-bump denial text is never resumed.
+		// Flattening here was the #7884 full-resend; continuity must survive the bump.
 		const current = configFingerprint(options(), context(), "oauth-slots", "primary");
 		const decision = decideNativeContinuity({
 			entry: undefined,
@@ -138,8 +139,9 @@ describe("claude-sdk-oauth config fingerprint stability", () => {
 			modelId: "claude-opus-4-5",
 			fingerprint: current,
 			transcriptAvailable: true,
+			crossAccountResumeSupported: true,
 		});
-		expect(decision).toEqual({ kind: "flatten", reason: "options_changed" });
+		expect(decision).toEqual({ kind: "reattach", sdkSessionId: "sdk-v1", from: 1, reason: "toolset_changed" });
 	});
 
 	it("stays fail-closed when the resolved Claude executable changes", () => {

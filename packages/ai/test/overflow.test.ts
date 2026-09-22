@@ -63,6 +63,21 @@ describe("isContextOverflow", () => {
 		expect(isContextOverflow(message, 262144)).toBe(true);
 	});
 
+	it("detects OpenAI exceeds the model's context window wording", () => {
+		const message = createErrorMessage("Your input exceeds the model's context window");
+		expect(isContextOverflow(message)).toBe(true);
+	});
+
+	it("detects OpenAI exceeds this model's context window wording", () => {
+		const message = createErrorMessage("Your input exceeds this model's context window");
+		expect(isContextOverflow(message)).toBe(true);
+	});
+
+	it("detects OpenAI exceeds the context window wording", () => {
+		const message = createErrorMessage("Your input exceeds the context window of this model");
+		expect(isContextOverflow(message)).toBe(true);
+	});
+
 	it("detects OpenRouter Poolside maximum allowed input length errors", () => {
 		const message = createErrorMessage(
 			"Provider returned error: Input length 131393 exceeds the maximum allowed input length of 131040 tokens.",
@@ -206,6 +221,51 @@ describe("isContextOverflow", () => {
 
 	it("does not treat HTTP 429 style errors as overflow", () => {
 		const message = createErrorMessage("Too many requests. Please slow down.");
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("does not treat tokens-per-minute rate limits as overflow", () => {
+		const message = createErrorMessage("Too many tokens per minute for this model. Retry in 20s");
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("does not treat exceeds-the-limit tokens-per-minute messages as overflow", () => {
+		const message = createErrorMessage("This request exceeds the limit of 30000 tokens per minute");
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("does not treat TPM quota wording as overflow even with overflow-looking phrasing", () => {
+		const message = createErrorMessage("TPM limit exceeded: too many tokens");
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("does not treat RPM quota wording as overflow even with overflow-looking phrasing", () => {
+		const message = createErrorMessage("RPM limit exceeded: too many tokens");
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("does not treat quota exceeded as overflow even with overflow-looking phrasing", () => {
+		const message = createErrorMessage("Quota exceeded: too many tokens in the last minute");
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("does not treat retry-after token quota wording as overflow even with overflow-looking phrasing", () => {
+		const message = createErrorMessage("Too many tokens. Retry after 10 seconds");
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("does not treat HTTP 429 prefixes as overflow even with overflow-looking phrasing", () => {
+		const message = createErrorMessage("429 Too many tokens");
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("does not treat status code 429 as overflow even with overflow-looking phrasing", () => {
+		const message = createErrorMessage("Request failed with status code 429: too many tokens");
+		expect(isContextOverflow(message, 200000)).toBe(false);
+	});
+
+	it("does not treat overloaded errors as overflow even with overflow-looking phrasing", () => {
+		const message = createErrorMessage("The model is overloaded. Too many tokens.");
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
 

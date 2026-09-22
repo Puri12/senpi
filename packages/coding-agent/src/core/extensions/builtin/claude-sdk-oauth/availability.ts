@@ -1,5 +1,27 @@
 import { spawn } from "node:child_process";
-import { defaultExecutableDeps, resolveClaudeCodeExecutable } from "./executable.ts";
+import {
+	defaultExecutableDeps,
+	describeClaudeCodeExecutable,
+	type ExecutableResolution,
+	resolveClaudeCodeExecutable,
+} from "./executable.ts";
+
+export type ClaudeLaneDiagnostics = ExecutableResolution & {
+	/** The JavaScript runtime spawning the binary; Bun and Node spell and stat Windows paths differently (#1541). */
+	runtime: "bun" | "node";
+};
+
+/**
+ * What a doctor surface reports for the Claude lane: the executable the query path would hand the
+ * SDK (validated by the same resolver, so the report cannot disagree with a turn), every candidate
+ * tried when there is none, and the host runtime.
+ */
+export function describeClaudeLane(): ClaudeLaneDiagnostics {
+	return {
+		...describeClaudeCodeExecutable(defaultExecutableDeps()),
+		runtime: process.versions.bun === undefined ? "node" : "bun",
+	};
+}
 
 /** Long enough to keep the probe off the per-request path, short enough that a fresh `claude login` is picked up promptly. */
 const AMBIENT_STATUS_TTL_MS = 30_000;

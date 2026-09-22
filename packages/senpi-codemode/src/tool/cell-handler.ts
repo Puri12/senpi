@@ -1,4 +1,9 @@
-import { type AgentToolResult, type ExtensionContext, sanitizeTerminalLabel } from "@code-yeongyu/senpi";
+import {
+	type AgentToolResult,
+	type ExtensionContext,
+	kernelToolsStorage,
+	sanitizeTerminalLabel,
+} from "@code-yeongyu/senpi";
 import type { KernelToHostMessage } from "../bridge/protocol.ts";
 import { RESERVED_SCHEMA_TOOL } from "../bridge/reserved.ts";
 import type { AgentExecuteTool } from "../bridges/agent-bridge.ts";
@@ -8,6 +13,7 @@ import { appendSchemaHint } from "../bridges/schema-hint.ts";
 import type { CompletionRequest, CompletionResult } from "../completion/handler.ts";
 import { handleCompletionToolCall } from "../completion/tool-bridge.ts";
 import type { ResolvedCodemodeSettings } from "../config/settings.ts";
+import type { KernelToolsCapability } from "../kernels/js/kernel-tools-types.ts";
 import {
 	boundToolCallArgs,
 	capCodePoints,
@@ -39,6 +45,8 @@ export interface CellBridgeRuntime {
 	readonly ctx: ExtensionContext;
 	readonly artifactPath?: string;
 	readonly imageResizer?: EvalImageResizer;
+	/** This cell's live kernel-tool capability; only a JS kernel has one (#1754). */
+	readonly kernelTools?: KernelToolsCapability;
 }
 
 export class CellHandler {
@@ -81,7 +89,7 @@ export class CellHandler {
 				this.#resultBuilder.display(message);
 				return;
 			case "tool-call": {
-				const pending = this.#handleToolCall(message);
+				const pending = this.#dispatchToolCall(message);
 				this.#state.pendingBridgeCalls.push(pending);
 				await pending;
 				return;
@@ -90,6 +98,8 @@ export class CellHandler {
 			case "init-failed":
 			case "result":
 			case "closed":
+			case "kernel-tool-describe-reply":
+			case "kernel-tool-invoke-reply":
 				return;
 			default:
 				throw new TypeError(`Unhandled kernel message: ${String(message)}`);
@@ -110,6 +120,19 @@ export class CellHandler {
 
 	liveResult(): AgentToolResult<EvalToolDetails> {
 		return this.#resultBuilder.liveResult();
+	}
+
+	/**
+	 * The worker's message loop fires outside the async context `run-eval-cell.ts` enters around the
+	 * awaited run chain, so the capability has to be entered here — around the whole dispatch, including
+	 * the reserved agent()/output() bridges where a host task tool resolves the parent's kernel tools —
+	 * for exactly the duration of each host tool call this cell makes (#1754). Without a capability
+	 * (py/rb/jl) the store stays empty and `ctx.kernelTools` remains undefined.
+	 */
+	async #dispatchToolCall(message: Extract<KernelToHostMessage, { type: "tool-call" }>): Promise<void> {
+		const kernelTools = this.#runtime.kernelTools;
+		if (kernelTools === undefined) return await this.#handleToolCall(message);
+		return await kernelToolsStorage.run(kernelTools, async () => await this.#handleToolCall(message));
 	}
 
 	async #handleToolCall(message: Extract<KernelToHostMessage, { type: "tool-call" }>): Promise<void> {
@@ -223,7 +246,12 @@ export class CellHandler {
 				type: "tool-reply",
 				callId: message.callId,
 				ok: false,
-				error: { message: text },
+				error: {
+					message: text,
+					...(error instanceof Error && "code" in error && typeof error.code === "string"
+						? { code: error.code }
+						: {}),
+				},
 			});
 		}
 		this.#resultBuilder.emitUpdate(false);

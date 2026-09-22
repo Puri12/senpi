@@ -6,6 +6,7 @@ import { resolveConfigValue } from "../resolve-config-value.ts";
 import { type CredentialBlock, classifyCredentialFailure } from "./classify.ts";
 import { discoverEnvSlots } from "./env-slots.ts";
 import { type RunSlot, runCredentialFailover } from "./failover.ts";
+import { isCommittedRotationOutput, isRotationStreamStart, rotationErrorFromEvent } from "./rotation-events.ts";
 import { acquireHalfOpenLease, type CredentialSlotRepository, type CredentialSlotState } from "./state-store.ts";
 
 /** The exact hash the claude-sdk-oauth affinity oracle uses, so pools never remap. */
@@ -18,6 +19,8 @@ export type RotationSlot = RunSlot & {
 	/** Env-lane key material for the attempt; never serialized or persisted. */
 	envKey?: string;
 	envVarName?: string;
+	/** Stored-lane material revision binding sidecar health to the current credential; never serialized. */
+	storedRevision?: string;
 };
 
 export type RotationSources = {
@@ -58,36 +61,50 @@ export async function listRotationSlots(
 ): Promise<RotationSlot[]> {
 	const acquireLeases = options.acquireLeases !== false;
 	const { providerId, credential, env, repository } = sources;
-	const policySlots = Object.entries(sources.policy?.slots ?? {}).flatMap(([name, ref]) => {
+	const policySlots: { name: string; envVarName: string; key: string; source: "env" }[] = [];
+	for (const [name, ref] of Object.entries(sources.policy?.slots ?? {})) {
 		const envVarName = ref.env ?? `models.json:${name}`;
 		const key =
-			ref.env !== undefined ? env(ref.env) : ref.value !== undefined ? resolveConfigValue(ref.value, {}) : undefined;
-		if (!key) return [];
-		return [{ name, envVarName, key, source: "env" as const }];
-	});
+			ref.env !== undefined
+				? env(ref.env)
+				: ref.value !== undefined
+					? await resolveConfigValue(ref.value, {})
+					: undefined;
+		if (!key) continue;
+		policySlots.push({ name, envVarName, key, source: "env" });
+	}
 	if (credential) {
 		const state = await repository.listSlots(providerId, "stored");
 		const slots: RotationSlot[] = [];
 		for (const slot of listCredentialSlots(credential)) {
-			const current = state[slot.name];
+			const persisted = state[slot.name];
+			const storedRevision = await repository.storedCredentialRevision(providerId, slot.name, {
+				key: slot.key,
+				access: slot.access,
+				refresh: slot.refresh,
+			});
+			// A block belongs to the material that earned it; a re-login starts clean.
+			const applicable = persisted?.credentialRevision === storedRevision ? persisted : undefined;
 			if (
 				acquireLeases &&
-				current?.blockedUntil !== undefined &&
-				current.blockedUntil <= (sources.now ?? Date.now)()
+				applicable?.blockedUntil !== undefined &&
+				applicable.blockedUntil <= (sources.now ?? Date.now)()
 			) {
 				const lease = await acquireHalfOpenLease(repository, providerId, "stored", slot.name, {
 					now: (sources.now ?? Date.now)(),
 				});
 				if (!lease) continue;
 				const leased = await repository.listSlots(providerId, "stored");
+				const leasedState = leased[slot.name];
 				slots.push(
 					overlayState(
 						{
 							name: slot.name,
 							lane: "stored",
 							pinned: (credential as PooledCredential).pinned === slot.name,
+							storedRevision,
 						},
-						leased[slot.name],
+						leasedState?.credentialRevision === storedRevision ? leasedState : undefined,
 					),
 				);
 				continue;
@@ -98,8 +115,9 @@ export async function listRotationSlots(
 						name: slot.name,
 						lane: "stored",
 						pinned: (credential as PooledCredential).pinned === slot.name,
+						storedRevision,
 					},
-					current,
+					applicable,
 				),
 			);
 		}
@@ -189,17 +207,12 @@ export type CredentialRotationOptions = {
 	) => AsyncIterable<AssistantMessageEvent> | Promise<AsyncIterable<AssistantMessageEvent>>;
 };
 
-function errorFromEvent(event: AssistantMessageEvent): unknown {
-	if (event.type !== "error") return undefined;
-	const message = event.error.errorMessage ?? "provider stream error";
-	return new Error(message);
-}
-
 /**
  * In-lane credential rotation for one provider request. Selection follows the
- * HRW order for the affinity key; only the `start` bookkeeping event counts as
- * pre-commit, so any delta bars silent rotation (default-DENY) and failures
- * after output carry the turn-retry suppression marker.
+ * HRW order for the affinity key. Rotation and same-slot retry stay transparent
+ * while only announcement frames have reached the caller; the first delta bars
+ * them, and a failure after it is forwarded as the provider's own terminal
+ * event for the session layer to recover from.
  */
 export function streamWithCredentialRotation(
 	options: CredentialRotationOptions,
@@ -222,8 +235,9 @@ export function streamWithCredentialRotation(
 			return winner;
 		},
 		runAttempt,
-		isCommittedOutput: (event) => event.type !== "start",
-		errorFromEvent,
+		isCommittedOutput: isCommittedRotationOutput,
+		isStreamStart: isRotationStreamStart,
+		errorFromEvent: rotationErrorFromEvent,
 		classify: (error, context) =>
 			classifyCredentialFailure(error, {
 				...context,
@@ -247,7 +261,7 @@ export function streamWithCredentialRotation(
 			const revision =
 				slot.lane === "env" && slot.envVarName !== undefined && slot.envKey !== undefined
 					? await sources.repository.envCredentialRevision(slot.envVarName, slot.envKey)
-					: undefined;
+					: slot.storedRevision;
 			await sources.repository.mutateSlotState(sources.providerId, slot.lane, slot.name, (current) =>
 				blockPatch(block, current, now(), revision, sources.policy),
 			);

@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import type {
+	BetaInputTransformation,
 	BetaStopReason,
-	BetaThinkingDroppedInputTransformation,
 	BetaTool,
 	BetaCacheControlEphemeral as CacheControlEphemeral,
 	BetaContentBlockParam as ContentBlockParam,
@@ -52,6 +52,7 @@ import { normalizeAnthropicRetryFailure } from "../utils/retry-profile/failure.t
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import {
 	applyServerFallbackAbort,
+	applyServerFallbackContinuation,
 	parseServerFallbackReceipt,
 	parseStickyFallbackReceipt,
 	type ServerFallbackReceipt,
@@ -59,8 +60,8 @@ import {
 import { normalizeToolCallId } from "../utils/tool-call-id.ts";
 import { isForcedToolChoiceUnsupportedError, omitToolChoiceParam } from "../utils/tool-choice-fallback.ts";
 import { resolveRootObjectSchema } from "../utils/tool-schema-compat.ts";
-import { demotedToolCallText, demotedToolResultText } from "../utils/unavailable-tool-text.ts";
 import { sanitizeAnthropicToolPairs } from "./anthropic-tool-pairs.ts";
+import { demoteUnavailableToolReferences } from "./anthropic-tool-references.ts";
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { getJsonSchemaToolParameters, resolveJsonSchemaStrictSampling } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
@@ -143,11 +144,15 @@ const claudeCodeTools = [
 ];
 
 const ccToolLookup = new Map(claudeCodeTools.map((t) => [t.toLowerCase(), t]));
+const ccToolAliases = new Map([["ask_user_question", "AskUserQuestion"]]);
 
 // Convert tool name to CC canonical casing if it matches (case-insensitive)
-const toClaudeCodeName = (name: string) => ccToolLookup.get(name.toLowerCase()) ?? name;
-const fromClaudeCodeName = (name: string, tools?: Tool[]) => {
+export const toClaudeCodeName = (name: string) =>
+	ccToolAliases.get(name) ?? ccToolLookup.get(name.toLowerCase()) ?? name;
+export const fromClaudeCodeName = (name: string, tools?: Tool[]) => {
 	if (tools && tools.length > 0) {
+		const alias = [...ccToolAliases].find(([, wireName]) => wireName === name);
+		if (alias && tools.some((tool) => tool.name === alias[0])) return alias[0];
 		const lowerName = name.toLowerCase();
 		const matchedTool = tools.find((tool) => tool.name.toLowerCase() === lowerName);
 		if (matchedTool) return matchedTool.name;
@@ -861,156 +866,11 @@ function sanitizeUnsupportedNativeTools(
 	return changed ? (sanitized as MessageCreateParamsStreaming) : params;
 }
 
-/**
- * Anthropic validates that every tool referenced by the message history is
- * available in the same request — defined in `tools` or discovered through a
- * `tool_reference` block — and rejects the whole request otherwise
- * ("Tool reference '<name>' not found in available tools"). Sessions outlive
- * their tools: an MCP server can be absent after a resume, an extension can
- * stop registering a tool, or a payload hook can strip a definition while the
- * history still carries the call. Demote those references to plain text so
- * the turn can proceed; the matching tool_result is demoted in lockstep so no
- * orphan pairing error replaces the original one.
- */
-function demoteUnavailableToolReferences(params: MessageCreateParamsStreaming): MessageCreateParamsStreaming {
-	const messages = params.messages;
-	if (!Array.isArray(messages) || messages.length === 0) return params;
-
-	const definedNames = new Set<string>();
-	if (Array.isArray(params.tools)) {
-		for (const tool of params.tools) {
-			if (isRecord(tool) && typeof tool.name === "string") definedNames.add(tool.name);
-		}
-	}
-
-	// `tool_reference` blocks — emitted for deferred tools or replayed from a
-	// server-side tool search — make their targets available without a
-	// non-deferred definition.
-	const discoveredNames = new Set<string>();
-	collectToolReferenceNames(messages, discoveredNames);
-
-	const demotedCallNames = new Map<string, string>();
-	for (const message of messages) {
-		if (message.role !== "assistant" || !Array.isArray(message.content)) continue;
-		for (const block of message.content) {
-			if (
-				isRecord(block) &&
-				block.type === "tool_use" &&
-				typeof block.name === "string" &&
-				!definedNames.has(block.name) &&
-				!discoveredNames.has(block.name)
-			) {
-				demotedCallNames.set(block.id, block.name);
-			}
-		}
-	}
-
-	// A `tool_reference` without its definition 400s the same way.
-	const danglingReferenceNames = new Set<string>();
-	for (const name of discoveredNames) {
-		if (!definedNames.has(name)) danglingReferenceNames.add(name);
-	}
-
-	if (demotedCallNames.size === 0 && danglingReferenceNames.size === 0) return params;
-
-	let changed = false;
-	const availableToolNames = [...definedNames];
-	const seenDemotedCallNames = new Set<string>();
-	const rewrittenMessages: MessageParam[] = [];
-	for (const message of messages) {
-		if (!Array.isArray(message.content)) {
-			rewrittenMessages.push(message);
-			continue;
-		}
-		let messageChanged = false;
-		const content: ContentBlockParam[] = [];
-		for (const block of message.content) {
-			if (message.role === "assistant" && isRecord(block) && block.type === "tool_use") {
-				const demotedName = demotedCallNames.get(block.id);
-				if (demotedName !== undefined) {
-					messageChanged = true;
-					const firstOccurrence = !seenDemotedCallNames.has(demotedName);
-					seenDemotedCallNames.add(demotedName);
-					content.push({
-						type: "text",
-						text: demotedToolCallText(demotedName, availableToolNames, firstOccurrence),
-					});
-					continue;
-				}
-			}
-			if (isRecord(block) && block.type === "tool_result") {
-				const demotedName = demotedCallNames.get(block.tool_use_id);
-				if (demotedName !== undefined) {
-					messageChanged = true;
-					content.push({ type: "text", text: demotedToolResultText(demotedName, toolResultText(block.content)) });
-					continue;
-				}
-				if (danglingReferenceNames.size > 0 && Array.isArray(block.content)) {
-					const kept: unknown[] = [];
-					const omitted: string[] = [];
-					for (const item of block.content) {
-						if (
-							isRecord(item) &&
-							item.type === "tool_reference" &&
-							typeof item.tool_name === "string" &&
-							danglingReferenceNames.has(item.tool_name)
-						) {
-							omitted.push(item.tool_name);
-							continue;
-						}
-						kept.push(item);
-					}
-					if (omitted.length > 0) {
-						messageChanged = true;
-						const nextContent =
-							kept.length > 0
-								? kept
-								: [{ type: "text", text: `Tool reference unavailable: ${[...new Set(omitted)].join(", ")}` }];
-						content.push({ ...block, content: nextContent } as ContentBlockParam);
-						continue;
-					}
-				}
-			}
-			content.push(block);
-		}
-		if (content.length === 0) {
-			changed = true;
-			continue;
-		}
-		if (messageChanged) {
-			changed = true;
-			rewrittenMessages.push({ ...message, content });
-			continue;
-		}
-		rewrittenMessages.push(message);
-	}
-
-	if (!changed) return params;
-	return { ...params, messages: rewrittenMessages };
-}
-
-function collectToolReferenceNames(value: unknown, names: Set<string>): void {
-	if (Array.isArray(value)) {
-		for (const item of value) collectToolReferenceNames(item, names);
-		return;
-	}
-	if (!isRecord(value)) return;
-	if (value.type === "tool_reference" && typeof value.tool_name === "string") names.add(value.tool_name);
-	for (const nested of Object.values(value)) collectToolReferenceNames(nested, names);
-}
-
-function toolResultText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (Array.isArray(content)) {
-		const parts: string[] = [];
-		for (const item of content) {
-			if (!isRecord(item)) continue;
-			if (item.type === "text" && typeof item.text === "string") parts.push(item.text);
-			else if (typeof item.type === "string") parts.push(`[${item.type}]`);
-		}
-		if (parts.length > 0) return parts.join("\n");
-	}
-	return "Tool output unavailable.";
+/** Numeric HTTP status carried by an SDK error (Anthropic APIError.status), if any. */
+function httpStatusOfError(error: unknown): number | undefined {
+	if (!isRecord(error)) return undefined;
+	const status = error.status;
+	return typeof status === "number" && Number.isInteger(status) && status >= 100 && status < 600 ? status : undefined;
 }
 
 function sanitizeAdaptiveThinkingPayload(
@@ -1324,7 +1184,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			let client: Anthropic;
 			let isOAuth: boolean;
 			let usageModel = model;
-			let inputTransformations: BetaThinkingDroppedInputTransformation[] | undefined;
+			let inputTransformations: BetaInputTransformation[] | undefined;
 
 			if (options?.client) {
 				client = options.client;
@@ -1405,25 +1265,40 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					throw error;
 				}
 			};
-			const { params: sentParams, response } = await retryProviderRequest(
-				async () => {
-					try {
-						return await createRequest();
-					} catch (error) {
-						if (unsignedThinkingReplay !== "text" && isInvalidUnsignedThinkingSignatureError(error)) {
-							unsignedThinkingReplay = "text";
-							if (fallbackKey) unsignedThinkingTextReplayFallbacks.add(fallbackKey);
-							return createRequest();
+			let requestOutcome: { params: MessageCreateParamsStreaming; response: Response };
+			try {
+				requestOutcome = await retryProviderRequest(
+					async () => {
+						try {
+							return await createRequest();
+						} catch (error) {
+							if (unsignedThinkingReplay !== "text" && isInvalidUnsignedThinkingSignatureError(error)) {
+								unsignedThinkingReplay = "text";
+								if (fallbackKey) unsignedThinkingTextReplayFallbacks.add(fallbackKey);
+								return createRequest();
+							}
+							throw error;
 						}
-						throw error;
-					}
-				},
-				{
-					maxRetries: options?.maxRetries,
-					maxRetryDelayMs: options?.maxRetryDelayMs,
-					signal: requestSignal,
-				},
-			);
+					},
+					{
+						maxRetries: options?.maxRetries,
+						maxRetryDelayMs: options?.maxRetryDelayMs,
+						signal: requestSignal,
+					},
+				);
+			} catch (error) {
+				// The SDK rejects HTTP failures instead of returning a Response, so a
+				// rejected request never reached onResponse. Deliver the numeric status
+				// once, after every internal retry, before the caller handles the error;
+				// errors without a status (network, aborts) report nothing rather than
+				// a fabricated code.
+				const status = httpStatusOfError(error);
+				if (status !== undefined) {
+					await options?.onResponse?.({ status, headers: {} }, model);
+				}
+				throw error;
+			}
+			const { params: sentParams, response } = requestOutcome;
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
@@ -1472,17 +1347,14 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						break;
 					}
 				} else if (event.type === "content_block_start") {
-					if (event.content_block.type === "fallback" && output.content.length > 0) {
-						throw new Error("Anthropic performed an unsupported mid-output model fallback");
-					}
-					const receipt =
-						options?.abortServerSideFallback === true
-							? parseServerFallbackReceipt(event.content_block)
-							: undefined;
+					const receipt = parseServerFallbackReceipt(event.content_block);
 					if (receipt !== undefined) {
-						serverFallbackReceipt = receipt;
-						serverFallbackAbort.abort();
-						break;
+						if (options?.abortServerSideFallback === true) {
+							serverFallbackReceipt = receipt;
+							serverFallbackAbort.abort();
+							break;
+						}
+						usageModel = applyServerFallbackContinuation(output, model, receipt);
 					}
 					if (event.content_block.type === "text") {
 						const block: Block = {
@@ -1997,8 +1869,14 @@ function createClient(
 	}
 
 	// API key auth
-	const sessionAffinityHeaders: Record<string, string | null> =
-		sessionId && getAnthropicCompat(model).sendSessionAffinityHeaders ? { "x-session-affinity": sessionId } : {};
+	const affinityCompat = getAnthropicCompat(model);
+	const sessionAffinityHeaders: Record<string, string | null> = {};
+	if (sessionId && affinityCompat.sendSessionAffinityHeaders) {
+		// OpenRouter routes prompt-cache affinity through its own header name and
+		// rejects x-session-affinity (earendil-works/pi#9102).
+		const header = affinityCompat.sessionAffinityFormat === "openrouter" ? "x-session-id" : "x-session-affinity";
+		sessionAffinityHeaders[header] = sessionId;
+	}
 	const client = new Anthropic({
 		apiKey: apiKey ?? null,
 		authToken: null,
@@ -2253,11 +2131,21 @@ function buildParams(
 		}
 	}
 
-	// Anthropic rejects a thinking-enabled request whose final assistant turn
-	// contains tool_use but does not begin with a thinking block. Cross-model
-	// histories lose their signed thinking blocks (demoted to text or dropped),
-	// so degrade thinking for this request instead of failing every turn.
-	if (params.thinking && params.thinking.type !== "disabled" && finalAssistantTurnStartsWithToolUse(params.messages))
+	// A budget-thinking request whose final assistant turn came from another API
+	// and starts with tool_use (its thinking demoted to text or dropped) is the
+	// history shape Anthropic has rejected with "final assistant message must
+	// start with a thinking block", so that request degrades thinking instead of
+	// failing every turn. Nothing else degrades: adaptive families accept a
+	// tool_use-first final turn (verified live 2026-09-09 on claude-opus-5,
+	// claude-opus-4-6 and claude-fable-5), the model itself skips thinking before
+	// trivial tool calls, and every change to `thinking` re-keys the prompt
+	// cache - degrading here re-wrote the whole cached prefix on each tool
+	// continuation (the "cache misses every second prompt" report).
+	if (
+		params.thinking?.type === "enabled" &&
+		finalAssistantTurnIsForeign(context.messages) &&
+		finalAssistantTurnStartsWithToolUse(params.messages)
+	)
 		disableThinkingForRequest(params, model, compat);
 
 	if (options?.metadata) {
@@ -2307,6 +2195,16 @@ type AnthropicMessageParam = MessageCreateParamsStreaming["messages"][number];
  * thinking/redacted_thinking block. Anthropic requires thinking-enabled
  * requests to start that turn with a thinking block.
  */
+/** True when the last assistant message was produced through a different wire API. */
+function finalAssistantTurnIsForeign(messages: Message[]): boolean {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message.role !== "assistant") continue;
+		return message.api !== "anthropic-messages";
+	}
+	return false;
+}
+
 function finalAssistantTurnStartsWithToolUse(messages: AnthropicMessageParam[]): boolean {
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];

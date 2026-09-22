@@ -1,5 +1,116 @@
 # changes
 
+## 2026-09-17 - `senpi host` command surface and its dispatch (senpi#1782)
+
+### What changed
+
+- `packages/coding-agent/src/cli/host-command.ts` (new): the command line of `senpi host ensure|status|stop|handoff` - argv into a typed `HostRequest` (`--launch-spec`, `--policy upgrade|fallback|never`, `--socket`, `--include-workers`, `--drain`, `--force`, and `--json` accepted as a no-op because the answer is always JSON), the usage text, and the ONE JSON line the contract promises. The line is written with a synchronous `writeSync(1, ...)`: `console.log` to a pipe is asynchronous, and the `process.exit` that follows would truncate the only thing the caller parses. An unknown subcommand or flag prints usage on stderr, NOTHING on stdout, and exits 2. What each request DOES lives in `src/modes/rpc/host-runner.ts` (see that tracker).
+- `packages/coding-agent/src/cli/deferred-commands.ts`: `HOST_COMMAND_ARGV` plus `dispatchHostCommand(args)`, which answers an exit CODE rather than a boolean (the command classifies its outcome in that code) and `undefined` when argv selects something else. The implementation stays behind an `await import(...)`, so `dist/main.js` still does not statically reach the RPC host graph.
+- `packages/coding-agent/src/main.ts`: the dispatch runs beside the app-server route, BEFORE `parseArgs`, and exits with the code it returns - so `host` never falls through into argument parsing or the interactive path.
+- `packages/coding-agent/src/cli/args.ts`: one `Commands:` line in `printHelp`, beside `app-server`, because a command a client is told to call has to be discoverable from `--help`. No flag parsing changes: `host` is routed before `parseArgs` ever runs.
+
+### Why
+
+- Every client of the shared daemon (terminal, desktop, omo launcher, task runner) needs the same answer to "is there a host, may I use it, may I replace it", and that decision has invariants no fourth implementation should re-derive. The CLI is the one surface they all reach it through, so its contract is machine-first: one JSON line, diagnostics on stderr, an exit code that classifies the outcome without parsing the line.
+- The route is a single argv[0] comparison for the same reason the package/config/app-server routes are: the module graph behind it must not be evaluated by an interactive launch.
+
+### Why an extension could not handle it
+
+- Command routing and process exit codes run before any extension is loaded.
+
+### Expected merge conflict zones
+
+- LOW: one import block and one dispatch branch in `main.ts`, and the tail of `deferred-commands.ts`.
+
+## 2026-09-17 - `--auto-title-sessions` deprecated for shared hosts (senpi#1782)
+
+### What changed
+
+- `packages/coding-agent/src/cli/args.ts`: JSDoc and help for `--auto-title-sessions` mark it deprecated for shared hosts in favor of per-session `open_session.auto_title`. The flag still parses and still opts every session on that process into titling when `auto_title` is omitted.
+
+### Why
+
+- A host-wide flag is a launch-profile collision once two clients share one daemon. The flag stays for one release so existing hosts keep working; the help has to say so.
+
+### Why an extension could not handle it
+
+- CLI help and argument docs run before any extension is loaded.
+
+### Expected merge conflict zones
+
+- LOW: the `autoTitleSessions` JSDoc on `Args` and the `--auto-title-sessions` help row in `printHelp`.
+
+## 2026-09-17 - `--session-runtime in-process|worker` for multi-session hosts (senpi#1782)
+
+### What changed
+
+- `packages/coding-agent/src/cli/args.ts`: new `SessionRuntimeKind` (`"in-process" | "worker"`), its `isSessionRuntimeKind` guard, the `Args.sessionRuntime` field, one parse branch for `--session-runtime <kind>` (an unknown value pushes a parse error diagnostic and sets nothing), one help line, and `resolveSessionRuntime(parsed)` - the single place the DEFAULT lives: `in-process` for a `--listen` socket host, `worker` for a stdio host (`--multi-session` alone, `--listen stdio://`) and for embedders. An explicit flag always wins.
+
+### Why
+
+- The shared socket host is one machine-wide daemon for every client, so its sessions must run in the host process with no isolate budget, while stdio hosts and embedders keep the worker runtime. Both hosts are started through the same argv, so the selection belongs in the argument layer, and a pure resolver keeps the default testable without booting a host.
+
+### Why an extension could not handle it
+
+- CLI argument parsing runs before any extension is loaded.
+
+### Expected merge conflict zones
+
+- LOW: the flag list in `Args`, the `--multi-session`/`--auto-title-sessions`/`--listen` parse branches, and the RPC block of `printHelp`.
+
+## 2026-09-17 - One-shot command dispatch owns its own module (senpi#1781)
+
+### What changed
+
+- New `packages/coding-agent/src/cli/deferred-commands.ts` holds the dispatch for the commands that exit before a session exists (package manager, config, app-server, list-models, list-tips, credential print, export), each loading its implementation with `await import(...)` at its own branch.
+
+### Why
+
+- `main.ts` imported every one of those trees at module load, so an interactive run paid for command code it never reached; extracting the dispatch also keeps `main.ts` from growing while the imports move.
+
+### Why an extension could not handle it
+
+- Command dispatch happens before the extension host is constructed.
+
+### Expected merge conflict zones
+
+- LOW: the new module; MEDIUM where `main.ts` calls into it.
+
+## 2026-09-16 - Startup spinner draws its first frame synchronously (oh-my-openagent#8371)
+
+### What changed
+
+- `packages/coding-agent/src/cli/startup-loading-indicator.ts`: `start()` writes the first frame itself (hidden cursor + label + phase) and the 120ms grace delay now gates only the animation interval; `resume()` redraws the same way before its grace timer. `setPhase()` therefore renders before any timer fires.
+
+### Why
+
+- The work the indicator covers is synchronous module loading (extension imports through jiti), which starves every timer until it finishes. Measured on a real pty during oh-my-openagent#8371: first spinner byte at 2.27s, a single frame before the TUI replaced it, the whole extension load on a blank terminal. A timer-driven first frame announces work that already ended.
+
+### Why an extension could not handle it
+
+- The indicator runs in the host before any extension is loaded; it is the thing extensions' own load time hides.
+
+### Expected merge conflict zones
+
+- LOW: `start()`, `resume()` and `beginAnimation()` bodies plus the class docstring; `test/startup-loading-indicator.test.ts` grace-delay cases.
+
+## 2026-09-10 - VENICE_API_KEY in the help output
+
+### What changed
+
+- `packages/coding-agent/src/cli/args.ts` adds a `VENICE_API_KEY` row to the Environment Variables help block.
+
+### Why
+
+- The help block is where users discover which API-key providers are supported; a provider registered in `packages/ai` but absent here reads as unsupported, which is exactly how the gap was reported.
+
+### Why an extension could not handle it
+
+- The `--help` text is emitted by the CLI arg parser before extensions load.
+
+### Expected merge conflict zones
+
+- LOW: the Environment Variables list in `args.ts` when upstream adds env rows.
 ## 2026-09-06 - Advertise a2a-server in CLI help
 
 ### What changed
@@ -386,3 +497,21 @@ The divergence lives in core wiring, package identity, or build plumbing that ex
 ### Expected merge conflict zones on next upstream sync
 
 - LOW: package-command rows in `printHelp()`.
+
+## Upstream sync (upstream/main@71dca871) integration repairs (2026-09-12)
+
+### What changed
+
+- `packages/coding-agent/src/cli/config-selector.ts`: the startup selector builds the fork `TUI` (not upstream's `TuiMainScreen`) on a `ProcessTerminal({ onExternalStdoutWrite: appendHiddenTuiStdout })` and drops the `agentDir` log-directory argument, while taking upstream's `getShowHardwareCursor()` and `setClearOnShrink(getClearOnShrink())` wiring.
+
+### Why
+
+- The fork renderer owns its log directory and routes stray stdout into the hidden TUI log; the startup selector must match `createStartupTui` so both startup paths behave the same.
+
+### Why an extension could not handle it
+
+- The selector runs before any session or extension exists.
+
+### Expected merge conflict zones
+
+- LOW: the `new TUI(...)`/`new ProcessTerminal(...)` construction in `showConfigSelector`.

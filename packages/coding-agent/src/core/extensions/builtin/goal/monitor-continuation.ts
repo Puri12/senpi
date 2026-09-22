@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "../../types.ts";
+import type { WakeSourceStateItem } from "../monitor-state-event.ts";
 import {
 	createGoalCacheWarmScheduleData,
 	estimateCacheWarmMetrics,
@@ -12,7 +13,10 @@ import {
 } from "./cache-warm.ts";
 import { subscribeGoalChannelState } from "./channel-state-subscriptions.ts";
 
-export { GOAL_MONITOR_CONTINUATION_FALLBACK_DELAY_MS } from "./cache-warm.ts";
+export {
+	GOAL_MONITOR_BACKSTOP_DEFAULT_DELAY_MS,
+	GOAL_MONITOR_CONTINUATION_FALLBACK_DELAY_MS,
+} from "./cache-warm.ts";
 
 import {
 	continuationTurnUsedTools,
@@ -22,12 +26,14 @@ import {
 	type GoalContinuationPath,
 	hasGoalContinuationProgress,
 	hashAssistantText,
+	isMalformedToolUseTurn,
 	normalizeAssistantText,
 } from "./continuation.ts";
 import { lastAssistantMessage } from "./last-assistant-message.ts";
 import {
 	admitAndQueueGoalContinuation,
 	buildCurrentGoalContinuationSignature,
+	isLastTurnStuckOnContextOverflow,
 	lastAssistantText,
 } from "./lifecycle-helpers.ts";
 import type {
@@ -46,6 +52,11 @@ import { goalStoreRef } from "./store-ref.ts";
 import { collectAssistantUsage } from "./turn-usage.ts";
 import type { Goal, TokenUsageSnapshot } from "./types.ts";
 import type { GoalWaitTicker } from "./wait-ticker.ts";
+
+/** Wake source the ask-user extension publishes while an async question is pending. */
+const ASK_USER_WAKE_SOURCE = "ask-user";
+/** `askUser.timeoutMinutes` default (settings-manager.ts), used when the session exposes no ask-user settings. */
+const ASK_USER_DEFAULT_TIMEOUT_MINUTES = 30;
 
 export const GOAL_CONTINUATION_SCHEDULED_EVENT = "goal_continuation_scheduled";
 export const GOAL_CONTINUATION_RESUMED_EVENT = "goal_continuation_resumed";
@@ -75,6 +86,7 @@ export class MonitorAwareGoalContinuation {
 	#scheduledDueAtMs: number | undefined;
 	#scheduledCache: GoalCacheWarmMetrics | undefined;
 	#scheduledDelayMs: number | undefined;
+	#askUserDeadlineAtMs: number | undefined;
 	#cacheWarmIteration = 0;
 	#scheduledCacheWarmIteration: number | undefined;
 	#heldTimer:
@@ -100,7 +112,7 @@ export class MonitorAwareGoalContinuation {
 	start(ctx: ExtensionContext): void {
 		this.#cancelTimer();
 		this.#ctx = ctx;
-		if (this.#hasStarted) this.#wakeSources.clear();
+		if (this.#hasStarted) this.#clearWakeSources();
 		else this.#hasStarted = true;
 		this.#goal = null;
 		this.#lastAgentEndMessages = [];
@@ -314,24 +326,29 @@ export class MonitorAwareGoalContinuation {
 		this.#channelStateUnsubscribers = [];
 		this.#ctx = undefined;
 		this.#goal = null;
-		this.#wakeSources.clear();
+		this.#clearWakeSources();
 		this.#lastAgentEndMessages = [];
 		this.#directInputHolds.clear();
 		this.#resetContinuationState();
 	}
 
-	#schedule(goal: Goal, kind: DelayedContinuationKind): void {
+	#schedule(goal: Goal, kind: DelayedContinuationKind, repark = false): void {
 		if (this.#scheduledContinuationKind !== undefined) return;
+		// A live wake source arms the periodic backstop only: the normal resumption
+		// is the drain fire in #setWakeSourceCount, and the backstop re-checks the
+		// goal every `promptCache.goalBackstopMaxSeconds` in case the source never
+		// delivers. A pending ask-user question is the exception: re-prompting the
+		// model every backstop while the user is deciding is noise it cannot act
+		// on, so the wait is parked on the question's own deadline instead.
+		const askUserWaitMs = kind === "monitor" ? this.#askUserWaitMs() : undefined;
 		const delayMs =
 			kind === "monitor"
-				? resolveGoalMonitorContinuationDelayMs(
-						this.#ctx?.getPromptCacheSafeWaitSeconds?.(),
-						this.#ctx?.getPromptCacheGoalBackstopMaxSeconds?.(),
-					)
+				? (askUserWaitMs ??
+					resolveGoalMonitorContinuationDelayMs(this.#ctx?.getPromptCacheGoalBackstopMaxSeconds?.()))
 				: GOAL_USER_GRACE_DELAY_MS;
 		this.#scheduledDelayMs = delayMs;
 		if (kind === "monitor") {
-			this.#cacheWarmIteration += 1;
+			if (!repark) this.#cacheWarmIteration += 1;
 			this.#scheduledCacheWarmIteration = this.#cacheWarmIteration;
 			const iteration = this.#scheduledCacheWarmIteration;
 			const cache = estimateCacheWarmMetrics(this.#ctx?.model, process.env, this.#lastTurnUsage);
@@ -348,10 +365,13 @@ export class MonitorAwareGoalContinuation {
 				...(cache !== undefined ? { cache } : {}),
 			});
 			this.#pi.events?.emit(GOAL_CONTINUATION_SCHEDULED_EVENT, scheduleData);
-			this.#appendWarmupEntry({
-				phase: "scheduled",
-				...scheduleData,
-			});
+			// Progress adjusts this wait; it is not another cache-warm iteration
+			// or transcript entry for every keystroke in the answer composer.
+			if (!repark)
+				this.#appendWarmupEntry({
+					phase: "scheduled",
+					...scheduleData,
+				});
 		} else {
 			this.#scheduledAtMs = undefined;
 			this.#scheduledCache = undefined;
@@ -503,6 +523,7 @@ export class MonitorAwareGoalContinuation {
 			hasPendingMessages: ctx.hasPendingMessages(),
 			path,
 			lastStopReason: lastAssistant?.stopReason,
+			lastTurnWasMalformedToolUse: lastAssistant?.role === "assistant" && isMalformedToolUseTurn(lastAssistant),
 			consecutiveContinuations: goal.consecutiveContinuations ?? 0,
 			lastContinuationSignature: goal.lastContinuationSignature,
 			currentSignature: buildCurrentGoalContinuationSignature(ctx, goal, lastAssistantText(messages)),
@@ -510,6 +531,7 @@ export class MonitorAwareGoalContinuation {
 			recentNormalizedOutputHashes: this.#recentNormalizedOutputHashes,
 			toollessContinuationStreak: this.#toollessContinuationStreak,
 			continuationPending: this.#isContinuationPending(),
+			lastTurnStuckOnContextOverflow: isLastTurnStuckOnContextOverflow(ctx, lastAssistant),
 		};
 	}
 
@@ -569,7 +591,7 @@ export class MonitorAwareGoalContinuation {
 		if (events === undefined) return;
 		this.#channelStateUnsubscribers.push(
 			...subscribeGoalChannelState(events, {
-				onWakeSource: (source, activeCount) => this.#setWakeSourceCount(source, activeCount),
+				onWakeSource: (source, activeCount, event) => this.#setWakeSourceCount(source, activeCount, event?.items),
 				onContinuationHold: (source, active) => {
 					const inputId = `external:${source}`;
 					if (active) this.holdDirectInput(inputId);
@@ -579,8 +601,60 @@ export class MonitorAwareGoalContinuation {
 		);
 	}
 
-	#setWakeSourceCount(source: string, activeCount: number): void {
+	/**
+	 * Remaining wait on a pending async ask-user question, or `undefined` when no
+	 * question is live. A deadline already in the past means the question outlived
+	 * its first idle window - the extension restarts that timer whenever the user
+	 * interacts - so the goal parks for one more window instead of falling back to
+	 * the periodic backstop. Clamped through the shared monitor bounds so a
+	 * misconfigured `askUser.timeoutMinutes` cannot park the goal past the
+	 * monitor's own ceiling.
+	 */
+	#askUserWaitMs(): number | undefined {
+		if ((this.#wakeSources.get(ASK_USER_WAKE_SOURCE) ?? 0) <= 0) return undefined;
+		const remainingMs = (this.#askUserDeadlineAtMs ?? 0) - Date.now();
+		const waitMs = remainingMs > 0 ? remainingMs : this.#askUserIdleTimeoutMs();
+		return resolveGoalMonitorContinuationDelayMs(waitMs / 1000);
+	}
+
+	#askUserIdleTimeoutMs(): number {
+		const minutes = this.#ctx?.getAskUserSettings?.().timeoutMinutes;
+		const resolved =
+			typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0
+				? minutes
+				: ASK_USER_DEFAULT_TIMEOUT_MINUTES;
+		return resolved * 60_000;
+	}
+
+	/**
+	 * Prefer the earliest authoritative request deadline. Legacy count-only
+	 * emitters retain the settings-window heuristic; zero clears the deadline.
+	 */
+	#noteAskUserWait(activeCount: number, items?: readonly WakeSourceStateItem[]): void {
+		if (activeCount <= 0) {
+			this.#askUserDeadlineAtMs = undefined;
+			return;
+		}
+		const deadlines = items?.flatMap((item) => (item.deadlineAtMs === undefined ? [] : [item.deadlineAtMs])) ?? [];
+		if (deadlines.length > 0) {
+			this.#askUserDeadlineAtMs = Math.min(...deadlines);
+			return;
+		}
+		const previousCount = this.#wakeSources.get(ASK_USER_WAKE_SOURCE) ?? 0;
+		if (activeCount > previousCount || this.#askUserDeadlineAtMs === undefined) {
+			this.#askUserDeadlineAtMs = Date.now() + this.#askUserIdleTimeoutMs();
+		}
+	}
+
+	#clearWakeSources(): void {
+		this.#wakeSources.clear();
+		this.#askUserDeadlineAtMs = undefined;
+	}
+
+	#setWakeSourceCount(source: string, activeCount: number, items?: readonly WakeSourceStateItem[]): void {
 		const previousTotal = this.#activeWakeSourceCount();
+		const previousDeadline = this.#askUserDeadlineAtMs;
+		if (source === ASK_USER_WAKE_SOURCE) this.#noteAskUserWait(activeCount, items);
 		this.#wakeSources.set(source, activeCount);
 		const nextTotal = this.#activeWakeSourceCount();
 		if (previousTotal > 0 && nextTotal === 0) {
@@ -590,6 +664,11 @@ export class MonitorAwareGoalContinuation {
 			return;
 		}
 		if (this.#scheduledContinuationKind === "monitor") {
+			if (previousDeadline !== this.#askUserDeadlineAtMs && this.#goal !== null) {
+				this.#cancelTimer();
+				this.#schedule(this.#goal, "monitor", true);
+				return;
+			}
 			this.#waitTicker?.setChannelCounts(this.#wakeSourceSnapshot());
 		}
 	}

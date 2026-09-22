@@ -856,6 +856,16 @@
       margin-top: var(--line-height);
     }
 
+    .skill-invocation-name {
+      color: var(--customMessageLabel);
+      font-weight: bold;
+      margin-top: var(--line-height);
+    }
+
+    .skill-invocation-name:first-child {
+      margin-top: 0;
+    }
+
     .skill-invocation.expanded .skill-invocation-collapsed {
       display: none;
     }

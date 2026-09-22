@@ -1,5 +1,375 @@
 # Builtin extensions changes
 
+## 2026-09-21 - Re-export the canonical question types from ask-user schema (#1931)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/schema.ts` re-exports `QuestionRequest` and `QuestionResponse` from `../../types.ts` instead of declaring textually identical local interfaces. `Question` and `QuestionOption` still derive from the imported `QuestionRequest`. Both `TODO(t3-merge)` markers are gone.
+
+### Why
+
+- One declaration of the question contract: the tool, the TUI dialog, the RPC bridge and every RPC client now read the same shape from the public extension API, and a future divergence is a type error rather than two silently different shapes. Type-only; no runtime diff.
+
+### Why an extension could not handle it
+
+- The duplicate lived inside this builtin's own module; only this builtin can stop declaring it.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/schema.ts`: the removed interfaces at the top of the file.
+
+## 2026-09-20 - Serve question card renderers without a registration (#1857 I4)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/render.ts` exports `askUserRenderers(toolName)`, the renderer pair for both question tool names, independent of whether the tools are registered.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts` gives the first attachment the full idle budget and a re-attachment only what the authoritative timer has left.
+- Registration itself stays inside session-start synchronization: registering at load also activates a directly exposed tool, which would hand a `noTools` session a question tool it never asked for.
+
+### Why
+
+- A question card can stream while the registry holds no ask-user tools - during a reload, or in a session where ask-user is disabled - and would otherwise render as a raw argument dump. Its renderers do not depend on the registration, so the card no longer does either.
+
+### Why an extension could not handle it
+
+- This builtin owns the question tools and their renderers; no other extension can supply them for a card the host is already drawing.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/render.ts`: renderer exports.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts`: attachment options.
+
+
+## 2026-09-20 - Recover unsettled async questions after restart (#1857 I3)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/resume.ts` recovers accepted async calls without settlement evidence. It excludes durable terminal entries, delivered answer frames in older sessions, prior recovery records, and live pending registrations.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/format.ts` exports the parser that inverts its answer formatter. Recovery and the answer chip consume the same grammar.
+
+### Why
+
+- An async tool result means acceptance, not completion. Recovery must distinguish unanswered requests from completed ones without replaying legacy answers.
+
+### Why an extension could not handle it
+
+- This builtin owns the session records and recovery dispatch. An outside extension would introduce competing registrations and delivery subscriptions.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/resume.ts`: terminal-evidence scan and recovery dispatch.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/format.ts`: shared answer-frame parser.
+
+## 2026-09-20 - Report question reattachment failures (#1857 I2)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts` turns a missing, throwing, or rejecting reload bridge into one orphaned outcome and one UI notice.
+
+### Why
+
+- Cancelling a failed reattachment silently leaves the model expecting an answer that can no longer arrive.
+
+### Why an extension could not handle it
+
+- The builtin owns the bridge promise and the single framed delivery; outside observers cannot safely settle it.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts`: fail and attach.
+
+## 2026-09-20 - Preserve pending questions across reload (#1857 I1)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/extension.ts` detaches pending UI bridges on reload and reattaches them on session start.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/registry.ts` retains the reattachment operations and draft options.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts` preserves the pending object, deadline, draft, and request ID while replacing the runner used for delivery. Old bridge responses cannot settle the replacement.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/notify.ts` declares a terminal settlement entry. The lifecycle records async outcomes, including silent cancellations, for restart recovery.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/resume.ts` leaves delivery to the pending lifecycle and avoids a second delivery subscription for a live request.
+- A request that expires without a bound runner becomes terminal immediately, resolves its completion, leaves the pending registry, and notifies the live UI. Its outcome waits in memory for the next bound runner rather than using a torn-down API.
+
+### Why
+
+- Reload is a UI ownership change, not a dismissal. Recreating a pending question would reset its timeout and duplicate its arrival metadata.
+
+### Why an extension could not handle it
+
+- This is the builtin extension that owns the pending registry and answer delivery; an external extension cannot transfer that ownership.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/extension.ts`: lifecycle handlers.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/registry.ts`: pending entry interface.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts`: startQuestion bridge and completion ownership.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/notify.ts`: settlement entry export.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/resume.ts`: single-owner delivery.
+
+## 2026-09-13 - Retain question headers for transcript replay (senpi#1645)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/notify.ts` declares the UI-only `ask-user:question` entry `{ requestId, headers }`. `ask-user/tool.ts` appends it once at fresh registration, after the existing-ID guard. It is ordinary custom-entry metadata, not an LLM message or a new question transport field.
+
+### Why
+
+- Existing timeout and dismissal answer frames omit their headers. Retaining a small display record lets the compact answer chip label those outcomes after restart without changing any model-facing text.
+
+### Why an extension could not handle it
+
+- The builtin owns the canonical request ID/header association at registration; the replay renderer only has persisted entries after the pending state is gone.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/notify.ts`: event/entry exports; `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts`: registration. `ask-user/format.ts` is unchanged, and tests prove custom metadata is absent from model context.
+
+## 2026-09-13 - Publish per-request ask-user deadlines (senpi#1645)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/monitor-state-event.ts` adds optional `WakeSourceStateItem.deadlineAtMs`. `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts` publishes each authoritative pending deadline and re-emits wake state after async UI progress touches the idle timer.
+
+### Why
+
+- A pending count alone cannot tell the goal monitor which request expires first or that typing extended a deadline.
+
+### Why an extension could not handle it
+
+- The ask-user builtin owns the pending state machine and its progress callback; outside consumers do not have those authoritative deadlines.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/monitor-state-event.ts`: WakeSourceStateItem; `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts`: emitWake and onProgress. Goal-side handling is tracked in `goal/changes.md`.
+
+## 2026-09-13 - Fresh question arrivals and exactly-once blocked lifetime (senpi#1645)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/notify.ts` declares `ask-user:asked`; `ask-user/tool.ts` emits it and `herdr:blocked` after registration, reuses an existing per-session request ID, and emits the inactive signal from its guarded settlement path in both wait modes.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/resume.ts` routes recovered disk calls through that same pending lifecycle, including orphaned outcomes, while retaining its original one-message delivery path and persisted recovery marker. Restart UI errors become explicit orphaned responses carrying the error, rather than losing it.
+- `packages/coding-agent/src/core/extensions/builtin/hooks/index.ts` maps arrival and settlement bus events into distinct Notification kinds. Existing settlement-hook fixtures still assert every prior settlement payload; they now distinguish arrival commands and await outstanding handlers before teardown. Real arrival-command tests cover both wait modes.
+
+### Why
+
+- Every consumer needs one blocked lifetime per request, independent of whether a TUI, RPC or app-server resolves it. Replaying an existing request must not produce another arrival or a competing pending timer.
+
+### Why an extension could not handle it
+
+- The builtin already owns registration, authoritative timeout and answer delivery. Notification and status consumers cannot safely recreate those lifetimes from UI frames or final tool results.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts`: startQuestion registration/finish; `ask-user/resume.ts`: recovery dispatch; `ask-user/notify.ts`: event exports; `hooks/index.ts`: Notification subscriptions.
+
+## 2026-09-13 - Expose authoritative ask-user idle deadlines (senpi#1645)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/registry.ts` adds the optional `QuestionDialogOptions.getDeadlineAtMs` getter. `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts` supplies it from the pending state machine, so TUI countdowns display rather than own the idle timeout.
+
+### Why
+
+- Recreating a widget or expanding a request must not restart a separate competing timeout.
+
+### Why an extension could not handle it
+
+- These files implement the builtin's existing pending-state-to-UI handoff. The additive option keeps QuestionRequest and transport frames unchanged.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/registry.ts`: QuestionDialogOptions; `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts`: startQuestion options.
+
+## 2026-09-11 - Partial ask-user answers resolve consistently
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/pending.ts` accepts a non-empty
+  partial answer map as `answered` and preserves the unanswered question ids.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/format.ts` renders unanswered
+  question headers for `answered` responses as well as comment-submitted responses.
+
+### Why
+
+- RPC previously kept a partial selection pending while app-server and desktop already allowed it,
+  so the same user action had different outcomes depending on the connected surface.
+
+### Why an extension could not handle it
+
+- The pending state machine and result formatter are the builtin's shared contract used by every
+  transport; an external extension cannot change their terminal resolution semantics.
+
+### Expected merge conflict zones
+
+- LOW in `ask-user/pending.ts` submit resolution and `ask-user/format.ts` status formatting.
+
+## 2026-09-10 - Account display-name commands and generated-ID-only post-login naming (senpi#1495)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/account-display-name.ts`: shared `rename <id> <display name...>` / `clear-name <id>` command handling plus optional naming after a committed-account receipt. Naming is offered only when the receipt reports `origin: "generated"`, so a provider flow that already prompted for the slot ID (Claude) does not produce a second name prompt. Blank or cancelled naming leaves login usable; invalid naming is reported separately from login success.
+- `packages/coding-agent/src/core/extensions/builtin/account/index.ts` and `packages/coding-agent/src/core/extensions/builtin/gpt-account.ts`: expose the new actions and render safe `displayName (name)` labels while pin/remove remain ID-based. OpenAI add captures the login receipt rather than inspecting credentials or account ordering.
+
+### Why
+
+- `packages/coding-agent/src/core/extensions/builtin/account-display-name.ts`, `packages/coding-agent/src/core/extensions/builtin/account/index.ts` and `packages/coding-agent/src/core/extensions/builtin/gpt-account.ts`: multi-account users need readable labels without changing the identifiers responsible for routing and continuity, and must not be asked to name the same account twice in one login.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/core/extensions/builtin/account-display-name.ts`, `packages/coding-agent/src/core/extensions/builtin/account/index.ts` and `packages/coding-agent/src/core/extensions/builtin/gpt-account.ts` ARE the extension implementation over shared core storage and receipt APIs; no new core command registry behavior was added.
+
+### Expected merge conflict zones
+
+- LOW: `packages/coding-agent/src/core/extensions/builtin/account-display-name.ts` is new; command argument hints, list formatting and add/login handling in `packages/coding-agent/src/core/extensions/builtin/account/index.ts` and `packages/coding-agent/src/core/extensions/builtin/gpt-account.ts`.
+
+## 2026-09-10 - A settled question aborts its dialog with the resolved status
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts`: `startQuestion`'s `finish()` now calls `controller.abort(response.status)` instead of a bare `controller.abort()`. The dialog controller is the only channel a still-waiting UI bridge has once the extension-side idle timer (`pending.ts`) settled the question, so the abort now names the terminal status - notably `timed_out`.
+
+### Why
+
+- The RPC bridge maps a bare abort onto `cancel()`, so an idle timeout was broadcast to every connection as `question_resolved{outcome:"cancelled"}` even though the tool result and the framed notice carried the timeout text. Making the extension's timer the authoritative one requires it to hand its outcome to the surface it aborts.
+
+### Why an extension could not handle it
+
+- This IS the builtin: the pending-question state machine and the dialog controller both live in `ask-user/tool.ts`.
+
+### Expected merge conflict zones
+
+- LOW: the tail of `finish()` in `ask-user/tool.ts`.
+
+## 2026-09-10 - Async question delivery belongs to the ask-user builtin
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/tool.ts`: for `waitForAnswer:false` questions `startQuestion` now attaches a delivery handler to the completion promise (it is still never awaited in `execute`, which keeps returning the acceptance result). When the question settles the new `deliverAnswer` helper sends `formatUserMessage(response, requestId, questions)` through `pi.sendUserMessage` with `deliverAs: "steer"` while a turn runs and `"followUp"` when `ctx.isIdle()` - a follow-up always triggers a turn, which is what wakes the model on the `timed_out` message. A `cancelled` response (dismissed, superseded, aborted, ask-user disabled, session closed) delivers nothing.
+
+### Why
+
+- Only the interactive TUI delivered async answers. The RPC and app-server question bridges ignore `opts.deliver`, so an answer - or the idle-timeout message - given over those surfaces was dropped and never reached the model. Owning delivery in the extension makes it surface-independent: a bridge only has to RESOLVE the question, and no surface can deliver it twice.
+
+### Why an extension could not handle it
+
+- The ask-user feature IS this builtin: the pending-question lifecycle, the framed-message formatter, and the completion promise all live in `ask-user/tool.ts`, and the delivery needs `pi.sendUserMessage` plus `ctx.isIdle()` from the extension runtime.
+
+### Expected merge conflict zones
+
+- LOW: `ask-user/tool.ts` - the new `deliverAnswer` helper above `emitWake` and the last statement of `startQuestion`.
+
+## 2026-09-10 - Resume dangling question calls
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/resume.ts` walks the current branch tail on `session_start` `resume`/`reload` for the newest `ask_user_question`/`request_user_input` tool call without a matching tool result. When `ctx.ui.question` exists it re-presents the original questions with a fresh idle timeout and delivers the answer as a framed user message; otherwise it delivers the `orphaned-after-restart` text once. `pi.appendEntry("ask-user:resumed", { toolCallId })` records the call so a later resume is a no-op.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/extension.ts` invokes the resume hook from the existing `session_start` handler after tool-set sync, without awaiting the UI so later session_start handlers are not blocked.
+
+### Why
+
+- Pending question timers are not persisted. A process restart leaves a dangling tool call in the session JSONL; the model needs the question re-shown or an explicit orphaned result rather than a silent hang.
+
+### Why an extension could not handle it
+
+- The dangling call lives in the session the builtin already owns. Re-presenting it requires the same `ctx.ui.question` bridge and `ask-user:resumed` custom entry as the rest of the ask-user extension.
+
+### Expected merge conflict zones
+
+- LOW: new `resume.ts`. `extension.ts` `session_start` handler body.
+
+## 2026-09-10 - Builtin question tool
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/index.ts` registers ask-user immediately after gpt-apply-patch.
+- `packages/coding-agent/src/core/extensions/builtin/ask-user/{index,extension,family,tool,render,registry}.ts` adds family selection, direct tool definitions, blocking and async execution, cancellation and timeout guards, renderers, and a session-keyed pending registry. UI bridges own async user-message delivery and RPC capability decisions. The builtin registers `--no-ask-user` for CLI validation. Print/json and missing question bridges deactivate the tools; other modes delegate to the supplied bridge regardless of the legacy `hasUI` flag.
+
+### Why
+
+- `packages/coding-agent/src/core/extensions/builtin/index.ts` makes material clarification available by default with exactly one model-family variant active. The ask-user modules reuse the canonical schema, formatter, and pending state machine rather than duplicating their contracts.
+
+### Why an extension could not handle it
+
+- The feature is implemented as an extension. `packages/coding-agent/src/core/extensions/builtin/index.ts` must register it to ship by default; UI transports separately implement the existing optional question API.
+
+### Expected merge conflict zones
+
+- LOW: new ask-user modules. `packages/coding-agent/src/core/extensions/builtin/index.ts` import and ordered registry entry; no public extension type changes.
+
+## 2026-09-10 - Extension logins own their abort controller (#1542)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/oauth-login-interaction.ts`: `createExtensionLoginInteraction` no longer captures `ctx.signal` (the active run's abort signal). It creates its own `AbortController`, hands `controller.signal` to `modelRuntime.login` and binds every dialog to it (combined with the per-prompt `AuthPrompt.signal`). The login is cancelled only when the user dismisses one of its own dialogs (the controller aborts with `Error("Login cancelled")`) or when a later login for the same `providerId` supersedes it via a module-level pending-login map. A dialog released by the provider's own `AuthPrompt.signal` (callback server won the race) still rejects with `Login cancelled` without cancelling the login. `ExtensionLoginInteractionOptions` gains optional `providerId`.
+- `packages/coding-agent/src/core/extensions/builtin/gpt-account.ts`: `/gpt-account add` passes `providerId: "openai-codex"`.
+
+### Why
+
+- Issue #1542: a `/gpt-account add` started while a response streamed was bound to that turn's controller, so Esc/steer/timeout on the response killed the browser login and surfaced it as a login failure.
+
+### Why an extension could not handle it
+
+- The interaction is the builtin account commands' own seam into `modelRuntime.login`; the signal it captures is decided here.
+
+### Expected merge conflict zones
+
+- LOW: both files are fork-only.
+
+## 2026-09-08 - Shared monitor telemetry contract
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/monitor-state-event.ts`: state entries gain optional command/filter/persistent/deadlineMs/fireCount/lastFiredAtMs fields, and the new `terminal_monitor_ended` event has a shared payload type and boundary guard.
+
+### Why
+
+- `packages/coding-agent/src/core/extensions/builtin/monitor-state-event.ts` is the wire contract for observers rendering monitor details and retaining ended watches. Optional state fields preserve mixed-version consumers.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/core/extensions/builtin/monitor-state-event.ts` defines the shared seam, while the terminal builtin owns the actual registry and event emissions.
+
+### Expected merge conflict zones
+
+- LOW: `packages/coding-agent/src/core/extensions/builtin/monitor-state-event.ts` event constants, entry fields, and ended payload guard.
+
+## Account commands relay OAuth login prompts through the extension UI (2026-09-08)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/oauth-login-interaction.ts` (new): `createExtensionLoginInteraction(ctx, { providerLabel, openBrowser? })` builds the `AuthInteraction` an account command hands to `modelRuntime.login`. `select` prompts go to `ctx.ui.select` over the option labels and the chosen label is mapped back to the option id; `text`, `secret` and `manual_code` prompts go to `ctx.ui.input` with the provider's placeholder; every dialog carries the command signal combined with the per-prompt `AuthPrompt.signal`, and a dismissed or aborted dialog rejects with `Login cancelled`. `auth_url` events open the browser when `ctx.mode === "tui"` and always print the URL plus the provider's instructions; `device_code` events print the verification URL together with `Enter code: <userCode>`; `info` events print their links.
+- `packages/coding-agent/src/core/extensions/builtin/gpt-account.ts`: `addAccount` uses the shared interaction instead of relaying every prompt to `ctx.ui.input(prompt.message)`; the factory accepts an optional `GptAccountExtensionDeps` (`openBrowser`) so tests can observe the browser launch.
+
+### Why
+
+- code-yeongyu/senpi#1485: `/gpt-account add` rendered `Select OpenAI Codex login method:` as an empty text input because the provider's `select` prompt was relayed as text, so the two login methods were never shown and an empty Enter reached the provider as `Unknown OpenAI Codex login method:`. The device-code flow printed the verification URL without the user code, and the browser flow told the user "A browser window should open" without opening one. `/login` already routes these prompts correctly (`core/auth-storage.ts` `handleLegacyPrompt`, `modes/rpc/login-prompts.ts`); the account commands now share one relay with the same rules.
+
+### Why an extension could not handle it
+
+- The commands live in the builtin registry and the relay sits between `modelRuntime.login` and the provider flow, a seam no user extension can interpose on.
+
+### Expected merge conflict zones
+
+- LOW: `gpt-account.ts` is fork-only; `oauth-login-interaction.ts` is new.
+
+## Plugin-root containment resolves against the filesystem (2026-09-07)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/hooks/safety.ts`: the two calls that build the plugin-root containment decision (`realTarget`, `realRoot`) resolve through `realpathSync.native`.
+- `packages/coding-agent/src/core/extensions/builtin/hooks/plugin-manifest.ts`: the same for `resolveContainedPath`'s `realPath` and its `pluginRoot` comparand.
+- The lexical pre-gates in both files are deliberately unchanged: they are syntactic checks over the declared path and are correct at that job.
+
+### Why
+
+- Node's JS-implemented `realpathSync` collapses a `..` inside a symlink target lexically, before following the symlink that segment sits behind. A hook target that walked back up through a symlinked directory inside the plugin root therefore resolved to a location reported as contained while the kernel opened a file outside the root, and the containment check accepted it. Measured on Linux and macOS: `realpathSync` answered `<root>/escape.mjs` while `readFileSync` on the same path returned the bytes of `<outside>/escape.mjs`. Corrective on Node; `dist/cli.js` is node-shebanged, so those are the default semantics on the CLI path. Behaviour-preserving on Bun, whose `realpathSync` already agrees with the kernel.
+
+### Why an extension could not handle it
+
+- The containment decision runs inside hook-manifest validation, before any extension can observe or veto a hook target, and it is the check that decides whether an extension's hook loads at all.
+
+### Expected merge conflict zones
+
+- LOW: two `realpathSync` lines in each validator; one-line changes with no signature or control-flow edits.
 ## Register the a2a builtin after webfetch (2026-09-06)
 
 ### What changed

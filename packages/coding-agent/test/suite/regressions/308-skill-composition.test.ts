@@ -202,13 +202,35 @@ describe("#308 skill composition", () => {
 		const actual = await promptAndCapture(harness, "Use $skill:debugging to inspect $HOME safely");
 		invocationEvents.unsubscribe();
 
-		expect(actual).toBe(`${skillBlock(skills[0]!, tempDir)}\n\n${userRequest("Use to inspect $HOME safely")}`);
+		expect(actual).toBe(
+			`${skillBlock(skills[0]!, tempDir)}\n\n${userRequest("Use [skill: debugging] to inspect $HOME safely")}`,
+		);
 		expect(invocationEvents.events).toEqual([
 			{
 				type: "skill_invocation",
 				skills: [{ name: "debugging", path: skills[0]!.filePath, syntax: "dollar" }],
 			},
 		]);
+	});
+
+	it("preserves Korean inline references and duplicate mixed invocations", async () => {
+		const { resourceLoader, skills, tempDir } = createFixtures([
+			{ name: "debugging", body: "# Debugging Skill\n\nTrace the defect." },
+			{ name: "review", body: "# Review Skill\n\nReview the result." },
+		]);
+		const harness = await createHarness({ resourceLoader });
+		harnesses.push(harness);
+
+		expect(
+			await promptAndCapture(
+				harness,
+				"한국어로 $skill:debugging 와 $skill:debugging 를 $skill:review 함께 확인해 주세요",
+			),
+		).toBe(
+			`${skillBlock(skills[0]!, tempDir)}\n\n${skillBlock(skills[1]!, tempDir)}\n\n${userRequest(
+				"한국어로 [skill: debugging] 와 [skill: debugging] 를 [skill: review] 함께 확인해 주세요",
+			)}`,
+		);
 	});
 
 	it("preserves indentation and blank-line structure outside removed tokens", async () => {
@@ -234,18 +256,25 @@ describe("#308 skill composition", () => {
 		expect(prompt.slice(tokens.at(-1)!.end)).toContain("$skill:debugging");
 	});
 
-	it("keeps bare inline dollar skill names literal", async () => {
-		const { resourceLoader } = createFixtures([
+	it("expands a bare inline dollar mention of a loaded skill and keeps unknown ones literal", async () => {
+		const { resourceLoader, skills, tempDir } = createFixtures([
 			{ name: "debugging", body: "# Debugging Skill\n\nTrace the defect." },
 		]);
 		const harness = await createHarness({ resourceLoader });
 		harnesses.push(harness);
 		const invocationEvents = collectSkillInvocationEvents(harness);
-		const prompt = "Use $debugging now";
 
-		expect(await promptAndCapture(harness, prompt)).toBe(prompt);
+		expect(await promptAndCapture(harness, "Use $debugging now")).toBe(
+			`${skillBlock(skills[0]!, tempDir)}\n\n${userRequest("Use [skill: debugging] now")}`,
+		);
+		expect(await promptAndCapture(harness, "Use $missing now")).toBe("Use $missing now");
 		invocationEvents.unsubscribe();
-		expect(invocationEvents.events).toEqual([]);
+		expect(invocationEvents.events).toEqual([
+			{
+				type: "skill_invocation",
+				skills: [{ name: "debugging", path: skills[0]!.filePath, syntax: "dollar" }],
+			},
+		]);
 	});
 
 	it("preserves mixed dollar and slash invocation order", async () => {

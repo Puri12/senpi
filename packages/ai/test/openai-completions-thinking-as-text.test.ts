@@ -59,6 +59,7 @@ const compat = {
 	| "toolSchemaFlavor"
 	| "thinkingTokenBudgetField"
 	| "vllmPriority"
+	| "veniceParameters"
 > & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
 	toolCallFormat?: OpenAICompletionsCompat["toolCallFormat"];

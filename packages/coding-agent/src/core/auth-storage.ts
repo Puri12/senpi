@@ -23,6 +23,7 @@ import {
 	listSlots,
 	type PooledCredential,
 	removeSlot,
+	repairManagedSentinelSlots,
 	upsertSlot,
 } from "@earendil-works/pi-ai/auth/pool/slots";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
@@ -31,7 +32,7 @@ import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
 import { getAgentDir } from "../config.ts";
 import { raceWithAbortSignal } from "../utils/abort.ts";
-import { getFileRevision, normalizePath } from "../utils/paths.ts";
+import { getFileContentRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import {
 	CredentialStoreBusyError,
@@ -45,6 +46,26 @@ import {
 import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
 
 type AuthStorageData = Record<string, Credential>;
+
+/**
+ * Heals pools poisoned by a shipped build that stored a provider-owned pool's
+ * flat sentinel as a generated `login-N` slot. Such a slot resolves to sentinel
+ * material, fails the provider's auth `check`, and hard-errors every request
+ * whose affinity picks it - deterministically, for the lifetime of the entry -
+ * so it is dropped the moment auth.json is read and the repair is written back
+ * once by the mutable store.
+ */
+function repairPoisonedPoolSlots(data: AuthStorageData): { data: AuthStorageData; repaired: boolean } {
+	let repaired: AuthStorageData | undefined;
+	for (const [providerId, credential] of Object.entries(data)) {
+		if (typeof credential !== "object" || credential === null) continue;
+		const healed = repairManagedSentinelSlots(providerId, credential);
+		if (!healed) continue;
+		repaired ??= { ...data };
+		repaired[providerId] = healed;
+	}
+	return repaired ? { data: repaired, repaired: true } : { data, repaired: false };
+}
 
 export type AuthCredential = Credential;
 export type { ApiKeyCredential, OAuthCredential };
@@ -289,7 +310,7 @@ export class ReadOnlyAuthStorage implements CredentialStore {
 			throw new Error(`Invalid auth.json credential for provider "${providerId}"`);
 		}
 
-		this.data = parsed as AuthStorageData;
+		this.data = repairPoisonedPoolSlots(parsed as AuthStorageData).data;
 		return this.data;
 	}
 
@@ -301,7 +322,7 @@ export class ReadOnlyAuthStorage implements CredentialStore {
 		if (credential.type !== "api_key" || !credential.key || isCommandConfigValue(credential.key)) {
 			return structuredClone(credential);
 		}
-		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+		return { ...credential, key: await resolveConfigValue(credential.key, credential.env) };
 	}
 
 	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
@@ -380,7 +401,7 @@ export class AuthStorage implements CredentialStore {
 			sharedAuthFileReadState = { authPath, readState: this.readState };
 		}
 		if (authPath) {
-			const revision = getFileRevision(authPath);
+			const revision = getFileContentRevision(authPath);
 			if (revision !== undefined && revision === this.readState.revision) return;
 		}
 		this.reload();
@@ -406,10 +427,15 @@ export class AuthStorage implements CredentialStore {
 	}
 
 	private parseStorageData(content: string | undefined): AuthStorageData {
+		return this.parseStorageContent(content).data;
+	}
+
+	/** Reports whether the parse had to heal poisoned pool slots, so a load can write the repair back once. */
+	private parseStorageContent(content: string | undefined): { data: AuthStorageData; repaired: boolean } {
 		if (!content) {
-			return {};
+			return { data: {}, repaired: false };
 		}
-		return JSON.parse(stripBom(content)) as AuthStorageData;
+		return repairPoisonedPoolSlots(JSON.parse(stripBom(content)) as AuthStorageData);
 	}
 
 	private recordError(error: unknown): void {
@@ -426,15 +452,20 @@ export class AuthStorage implements CredentialStore {
 	 * Reload credentials from storage.
 	 */
 	reload(): void {
-		let content: string | undefined;
+		let data: AuthStorageData = {};
 		let revision: string | undefined;
 		try {
 			this.storage.withLock((current) => {
-				content = current;
-				revision = this.authPath ? getFileRevision(this.authPath) : undefined;
-				return { result: undefined };
+				const parsed = this.parseStorageContent(current);
+				data = parsed.data;
+				// A written repair invalidates the revision read before it; leaving it
+				// unset makes the next reader re-read instead of trusting a stale stamp.
+				revision = parsed.repaired || !this.authPath ? undefined : getFileContentRevision(this.authPath);
+				return parsed.repaired
+					? { result: undefined, next: JSON.stringify(parsed.data, null, 2) }
+					: { result: undefined };
 			});
-			this.updateReadState(this.parseStorageData(content), revision);
+			this.updateReadState(data, revision);
 		} catch (error) {
 			// Preserve the last valid in-memory snapshot.
 			this.recordError(error instanceof Error ? error : new Error(String(error)));
@@ -532,10 +563,12 @@ export class AuthStorage implements CredentialStore {
 
 	private async reloadFromStorageAsync(options?: AuthOperationOptions): Promise<AuthStorageData> {
 		return this.storage.withLockAsync(async (content) => {
-			const currentData = this.parseStorageData(content);
-			const revision = this.authPath ? getFileRevision(this.authPath) : undefined;
-			this.updateReadState(currentData, revision);
-			return { result: currentData };
+			const parsed = this.parseStorageContent(content);
+			const revision = parsed.repaired || !this.authPath ? undefined : getFileContentRevision(this.authPath);
+			this.updateReadState(parsed.data, revision);
+			return parsed.repaired
+				? { result: parsed.data, next: JSON.stringify(parsed.data, null, 2) }
+				: { result: parsed.data };
 		}, options);
 	}
 
@@ -550,7 +583,7 @@ export class AuthStorage implements CredentialStore {
 				return this.readState.data;
 			}
 		}
-		const revision = getFileRevision(this.authPath);
+		const revision = getFileContentRevision(this.authPath);
 		if (revision !== undefined && revision === this.readState.revision) return this.readState.data;
 		if (!this.readState.reload) {
 			const controller = new AbortController();
@@ -597,7 +630,7 @@ export class AuthStorage implements CredentialStore {
 		options?.signal?.throwIfAborted();
 		if (credential?.type !== "api_key") return credential;
 		if (credential.key === undefined) return credential;
-		return { ...credential, key: resolveConfigValue(credential.key, credential.env) };
+		return { ...credential, key: await resolveConfigValue(credential.key, credential.env) };
 	}
 
 	async modify(
@@ -612,7 +645,7 @@ export class AuthStorage implements CredentialStore {
 			const next = await fn(currentData[provider]);
 			if (next === undefined) {
 				latestData = currentData;
-				revision = this.authPath ? getFileRevision(this.authPath) : undefined;
+				revision = this.authPath ? getFileContentRevision(this.authPath) : undefined;
 				return { result: currentData[provider] };
 			}
 

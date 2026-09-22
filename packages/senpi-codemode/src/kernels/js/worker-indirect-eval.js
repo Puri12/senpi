@@ -1,3 +1,5 @@
+import { findShadowedGlobalName } from "./worker-shadow-guard.js";
+
 export function indirectEval(source, filename) {
 	const withPragma = filename ? `${source}\n//# sourceURL=${filename}` : source;
 	const geval = globalThis.eval;
@@ -11,7 +13,7 @@ export async function awaitMaybePromise(value) {
 
 export function wrapUserCode(code) {
 	const persistentCode = persistTopLevelDeclarations(code);
-	if (/\breturn\b/u.test(persistentCode)) return `(async () => {\n${persistentCode}\n})()`;
+	if (scanTopLevelStatements(persistentCode).hasTopLevelReturn) return `(async () => {\n${persistentCode}\n})()`;
 	return `(async () => {\n${captureLastExpression(persistentCode)}\n})()`;
 }
 
@@ -265,6 +267,12 @@ function rewriteDeclaration(code, declarationStart, start, end, keyword) {
 		const bindings = [];
 		collectPatternNames(pattern, bindings);
 		if (bindings.length === 0) return undefined;
+		const shadowed = findShadowedGlobalName(bindings);
+		if (shadowed !== undefined) {
+			throw new Error(
+				`eval cell declares top-level \`${shadowed}\`, but a global with that name already exists in the JS kernel. Persisting it would replace that global for every later cell. Rename the binding (for example \`${shadowed}Local\`), or assign globalThis.${shadowed} explicitly if replacing it is truly intended.`,
+			);
+		}
 		if (preserveDeclaration) {
 			for (const name of bindings) assignments.push(`globalThis[${JSON.stringify(name)}] = ${name};`);
 			continue;
@@ -705,7 +713,7 @@ function skipBlockComment(code, start) {
 }
 
 function captureLastExpression(code) {
-	const start = findLastTopLevelStatementStart(code);
+	const start = scanTopLevelStatements(code).lastStatementStart;
 	const head = code.slice(0, start);
 	const tail = code.slice(start).trim();
 	if (!tail || isStatementOnly(tail)) return code;
@@ -726,7 +734,7 @@ function isStatementOnly(source) {
 
 const CONTROL_PAREN_KEYWORDS = new Set(["catch", "for", "if", "switch", "while", "with"]);
 
-function findLastTopLevelStatementStart(code) {
+function scanTopLevelStatements(code) {
 	let start = 0;
 	let round = 0;
 	let square = 0;
@@ -734,6 +742,7 @@ function findLastTopLevelStatementStart(code) {
 	let canStartRegex = true;
 	let lastSignificant = "";
 	let pendingControlParen = false;
+	let hasTopLevelReturn = false;
 	const controlParens = [];
 	for (let index = 0; index < code.length; index += 1) {
 		const char = code[index];
@@ -763,8 +772,11 @@ function findLastTopLevelStatementStart(code) {
 		if (isIdentifierStart(char)) {
 			const end = readIdentifier(code, index);
 			const token = code.slice(index, end);
-			canStartRegex = REGEX_PREFIX_KEYWORDS.has(token);
-			pendingControlParen = CONTROL_PAREN_KEYWORDS.has(token);
+			const isPropertyName = lastSignificant === ".";
+			const atTopLevel = round === 0 && square === 0 && curly === 0;
+			if (token === "return" && atTopLevel && !isPropertyName) hasTopLevelReturn = true;
+			canStartRegex = !isPropertyName && REGEX_PREFIX_KEYWORDS.has(token);
+			pendingControlParen = !isPropertyName && CONTROL_PAREN_KEYWORDS.has(token);
 			lastSignificant = code[end - 1];
 			index = end - 1;
 			continue;
@@ -828,7 +840,7 @@ function findLastTopLevelStatementStart(code) {
 			pendingControlParen = false;
 		}
 	}
-	return start;
+	return { lastStatementStart: start, hasTopLevelReturn };
 }
 
 const STATEMENT_CONTINUATION_KEYWORDS = new Set(["catch", "else", "finally"]);

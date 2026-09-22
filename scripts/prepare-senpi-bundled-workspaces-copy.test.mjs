@@ -38,7 +38,7 @@ function writeShrinkwrap(root, packages) {
 }
 
 describe("copyPublishDependencies", () => {
-	it("copies direct publish dependencies and skips internal workspaces and missing optional packages", () => {
+	it("stages every manifest entry, nested ones from the hoisted copy, and skips internal workspaces and missing optional packages", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "senpi-bundle-deps-"));
 		writePackage(tempDir, "typebox");
 		writePackage(tempDir, "@scope/pkg");
@@ -82,13 +82,15 @@ describe("copyPublishDependencies", () => {
 				),
 			/ENOENT/,
 		);
-		assert.throws(
-			() =>
+		// The manifest nests nested-only under typebox although the installer hoisted it.
+		assert.equal(
+			JSON.parse(
 				readFileSync(
-					join(tempDir, "packages", "coding-agent", "node_modules", "typebox", "node_modules", "nested-only"),
+					join(tempDir, "packages", "coding-agent", "node_modules", "typebox", "node_modules", "nested-only", "package.json"),
 					"utf8",
 				),
-			/ENOENT/,
+			).name,
+			"nested-only",
 		);
 	});
 
@@ -106,7 +108,8 @@ describe("copyPublishDependencies", () => {
 		// When
 		copyPublishDependencies(tempDir);
 
-		// Then: the transitive dependency rides along with its parent's directory copy.
+		// Then: the transitive dependency is staged at its manifest path (from the copy nested
+		// under the parent in the install; the parent's own copy excludes installer nesting).
 		assert.equal(
 			JSON.parse(
 				readFileSync(
@@ -116,6 +119,36 @@ describe("copyPublishDependencies", () => {
 			).name,
 			"nested-dep",
 		);
+	});
+
+	it("copies dependency source verbatim without the retired css-tree rewrite", () => {
+		// Given: a dependency left in a stale publish graph is copied, never patched.
+		tempDir = mkdtempSync(join(tmpdir(), "senpi-bundle-compile-safe-"));
+		const cssTreeSource = join(tempDir, "node_modules", "css-tree");
+		mkdirSync(join(cssTreeSource, "lib"), { recursive: true });
+		mkdirSync(join(cssTreeSource, "data"), { recursive: true });
+		writeJson(join(cssTreeSource, "package.json"), { name: "css-tree", version: "3.2.1", type: "module" });
+		writeFileSync(join(cssTreeSource, "data", "patch.json"), JSON.stringify({ properties: { color: { syntax: "<color>" } } }));
+		const dataPatchSource =
+			"import { createRequire } from 'module';\n\nconst require = createRequire(import.meta.url);\nconst patch = require('../data/patch.json');\n\nexport default patch;\n";
+		writeFileSync(join(cssTreeSource, "lib", "data-patch.js"), dataPatchSource);
+		writeShrinkwrap(tempDir, {
+			"": { dependencies: { "css-tree": "3.2.1" } },
+			"node_modules/css-tree": { version: "3.2.1" },
+		});
+
+		// When
+		copyPublishDependencies(tempDir);
+
+		// Then: staging preserves the dependency source exactly.
+		const staged = readFileSync(
+			join(tempDir, "packages", "coding-agent", "node_modules", "css-tree", "lib", "data-patch.js"),
+			"utf8",
+		);
+		assert.equal(staged, dataPatchSource);
+
+		// ...and publishing never rewrites the developer's installed dependency.
+		assert.equal(readFileSync(join(cssTreeSource, "lib", "data-patch.js"), "utf8"), dataPatchSource);
 	});
 
 	it("throws when a required publish dependency is not installed", () => {

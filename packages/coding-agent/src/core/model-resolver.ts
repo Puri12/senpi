@@ -39,6 +39,7 @@ export const defaultModelPerProvider: Record<string, string> = {
 	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
 	"ant-ling": "Ring-2.6-1T",
 	anthropic: "claude-opus-4-8",
+	bai: "gpt-5.6-sol",
 	openai: "gpt-5.6-sol",
 	"azure-openai-responses": "gpt-5.4",
 	"openai-codex": "gpt-5.6-sol",
@@ -46,6 +47,8 @@ export const defaultModelPerProvider: Record<string, string> = {
 	// Cursor ships no models until its chat protocol is ported; "auto" matches
 	// the Cursor agent's native model auto-selection once models exist.
 	cursor: "auto",
+	// Radius resolves its catalog after discovery; "balanced" is the selectable default.
+	radius: "balanced",
 	nvidia: "nvidia/nemotron-3-super-120b-a12b",
 	deepseek: "deepseek-v4-pro",
 	google: "gemini-3.1-pro-preview",
@@ -67,6 +70,7 @@ export const defaultModelPerProvider: Record<string, string> = {
 	huggingface: "moonshotai/Kimi-K2.6",
 	fireworks: "accounts/fireworks/models/kimi-k2p6",
 	together: "moonshotai/Kimi-K2.6",
+	venice: "z-ai-glm-5-3",
 	baseten: "zai-org/GLM-5.2",
 	opencode: "kimi-k2.6",
 	"opencode-go": "kimi-k2.6",

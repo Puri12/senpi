@@ -5,6 +5,7 @@ import {
 	classifyCredentialFailure,
 	rateLimitCooldown,
 } from "../src/core/credential-pool/classify.ts";
+import { allAccountsBlockedGuidance } from "../src/core/extensions/builtin/claude-sdk-oauth/guidance.ts";
 
 function status(code: number, message = `HTTP ${code}`): Error {
 	const error = new Error(message);
@@ -49,6 +50,27 @@ describe("credential error taxonomy", () => {
 	});
 
 	test.each([
+		["abnormal closure 1006", new Error("WebSocket closed 1006 Connection ended")],
+		["going away 1001", new Error("WebSocket closed 1001")],
+		["server error 1011", new Error("WebSocket closed 1011 internal error")],
+		["service restart 1012", new Error("WebSocket closed 1012")],
+		["try again later 1013", new Error("WebSocket closed 1013")],
+		["bad gateway 1014", new Error("WebSocket closed 1014")],
+		["bare websocket error", new Error("WebSocket error")],
+		["connect timeout", new Error("WebSocket connect timeout after 15000ms")],
+		["liveness timeout", new Error("WebSocket liveness timeout after 70000ms (2 pings unanswered)")],
+	] as const)("%s is a transport fault: retries the same slot without blocking it (senpi#1628)", (_label, error) => {
+		expect(classifyCredentialFailure(error)).toEqual({ kind: "retry_same", maxAttempts: 2 });
+	});
+
+	test.each([
+		["message too big 1009", new Error("WebSocket closed 1009 message too big")],
+		["policy violation 1008", new Error("WebSocket closed 1008 policy violation")],
+	] as const)("%s is a request fault: fails the request instead of replaying it", (_label, error) => {
+		expect(classifyCredentialFailure(error).kind).toBe("fail_request");
+	});
+
+	test.each([
 		["context overflow", new Error("prompt is too long: maximum context length exceeded")],
 		["invalid model", new Error("model_not_found: no such model")],
 		["400", status(400, "Bad Request")],
@@ -60,6 +82,15 @@ describe("credential error taxonomy", () => {
 		expect(classifyCredentialFailure(error).kind).toBe("fail_request");
 	});
 
+	test("an unconfigured-slot auth miss fails over instead of dead-ending the pool", () => {
+		// `Provider is not configured: <provider>` is what prepareRequest throws
+		// when the slot the rotation picked carries no usable auth (the sentinel
+		// slots a shipped bug wrote). One such slot must block ITSELF and let the
+		// pool try the healthy siblings, not fail the request.
+		const action = classifyCredentialFailure(new Error("Provider is not configured: claude-sdk-oauth"));
+		expect(action).toEqual({ kind: "failover", block: { reason: "auth_error" } });
+	});
+
 	test("the server retry hint is a floor, not an override", () => {
 		// A hint shorter than the earned backoff must not shorten the cooldown.
 		expect(rateLimitCooldown(3, 1_000).cooldownMs).toBe(COOLDOWN_BASE_MS * 8);
@@ -69,5 +100,16 @@ describe("credential error taxonomy", () => {
 		const capped = rateLimitCooldown(0, COOLDOWN_CAP_MS * 2);
 		expect(capped.cooldownMs).toBe(COOLDOWN_CAP_MS);
 		expect(capped.retryAfterWasCapped).toBe(true);
+	});
+
+	test("lane all-blocked guidance for an auth-dominated pool classifies as auth_error, not rate_limit (omo#8383)", () => {
+		const action = classifyCredentialFailure(new Error(allAccountsBlockedGuidance(undefined, "auth_error")));
+		expect(action).toEqual({ kind: "failover", block: { reason: "auth_error" } });
+	});
+
+	test("lane all-blocked guidance without an auth block stays a rate-limit cooldown", () => {
+		const action = classifyCredentialFailure(new Error(allAccountsBlockedGuidance(undefined)));
+		expect(action.kind).toBe("failover");
+		if (action.kind === "failover") expect(action.block.reason).toBe("rate_limit");
 	});
 });

@@ -1,5 +1,151 @@
 # changes
 
+## 2026-09-17 - Keep a thread's MCP inventory current after deferred attach (senpi#1781)
+
+### What changed
+
+- `threads/mcp-wire-status.ts`: `McpWireStatusAdapter` can adopt a live subscription (`bindLiveUpdates`) and drop it (`dispose`); `McpWireStatusRegistry.removeThread` disposes the thread's adapter.
+- `runtime.ts`: after binding a thread, the adapter subscribes to `McpService.onWireStatusChanged` filtered to that thread id.
+
+### Why
+
+- senpi#1791 stopped `session_start` awaiting MCP attach. The inventory copied immediately after `bindExtensions()` is therefore taken while servers are still booting, and `update()` had no callers, so `mcpServerStatus/list` returned `{ servers: [] }` for the life of the thread and never recovered.
+- The adapter's contract - never read the process-global MCP service during a request - is preserved: this is a push from a subscription the service already emitted on every capture, not a per-request read.
+
+### Expected merge conflict zones
+
+- LOW: the adapter class body and the post-bind block in `createBoundAppServerSession`.
+
+## 2026-09-12 - App-server turn steering carries its input source
+
+### What changed
+
+- `packages/coding-agent/src/modes/app-server/threads/turns.ts` and `src/modes/app-server/turn-adapter.ts`: turn steering and follow-up input pass the app-server `InputSource` value to `AgentSession.steer()` / `followUp()`, so extension `input` handlers observe the real source instead of the interactive default (upstream faa9863cb, adopted per D-N).
+
+### Why
+
+- Same gap as RPC: queued app-server input skipped extension `input` handlers.
+
+### Why an extension could not handle it
+
+- Source tagging happens where the session enqueues input, below the extension API.
+
+### Expected merge conflict zones
+
+- The steer/follow-up call sites in `threads/turns.ts` and `turn-adapter.ts`, and the `InputSource` union.
+
+## 2026-09-12 - Read a guard-less pidfile as unknown ownership
+
+### What changed
+
+- `packages/coding-agent/src/modes/app-server/daemon/process.ts`: `DaemonPidFile.processStartTime`
+  accepts `null` for a record written while the identity probe was starved, `parseDaemonPidFile`
+  round-trips it, and `processMatchesPidFile` answers only the liveness half for such a record - a
+  pid that is gone is `false`, a live one raises `ProcessIdentityUnreadableError`.
+
+### Why
+
+- The RPC host registration needs a way to record a live host it cannot fingerprint. Without a
+  representable "no guard" state the supervisor had to choose between killing a healthy host and
+  writing a record that later callers would mistake for proven ownership; the null guard makes the
+  unknown explicit so no caller can signal a pid it never verified.
+
+### Why an extension could not handle it
+
+- The pidfile contract is consumed by daemon and RPC supervisor code that runs before extensions
+  load.
+
+### Expected merge conflict zones
+
+- LOW around the `DaemonPidFile` shape and the head of `processMatchesPidFile`.
+
+## 2026-09-11 - Treat live processes with temporarily absent identity as observable gaps
+
+### What changed
+
+- `packages/coding-agent/src/modes/app-server/daemon/process.ts`: `processMatchesPidFile`
+  now checks process liveness when a platform identity probe returns no identity. A live PID
+  remains an observation failure within the bounded probe budget instead of being treated as a
+  dead or replaced process.
+
+### Why
+
+- Windows CIM queries can transiently return an empty result for a process that is still alive.
+  Treating that result as a PID mismatch lets concurrent RPC host startup reclaim a healthy host.
+
+### Why an extension could not handle it
+
+- The process identity reader is the ownership boundary used by daemon and RPC lifecycle code;
+  extensions cannot safely alter its result after a host has been classified.
+
+### Expected merge conflict zones
+
+- LOW around `daemon/process.ts` process identity probe classification.
+
+## 2026-09-11 - Partial ask-user responses resolve with unanswered ids
+
+### What changed
+
+- `packages/coding-agent/src/modes/app-server/server/user-input-bridge.ts` now receives the shared
+  pending-question partial-submit behavior, resolving a non-empty answer map as `answered` while
+  preserving unanswered ids.
+
+### Why
+
+- App-server already accepted partial responses, but the shared pending state machine previously
+  disagreed with RPC. This tracker records the cross-surface contract that must remain aligned.
+
+### Why an extension could not handle it
+
+- The app-server bridge owns protocol response correlation and consumes the shared pending state
+  machine before extension code can alter the result.
+
+### Expected merge conflict zones
+
+- LOW around `UserInputBridge.resolveResponse`; preserve the existing request ordering and
+  `serverRequest/resolved` lifecycle.
+
+## 2026-09-10 - Optional display-name account descriptor (senpi#1495)
+
+### What changed
+
+- `packages/coding-agent/src/modes/app-server/protocol/account.ts`: `ProviderAccount` gains optional `displayName`, matching the shared secret-free account read response. `name` remains the immutable selector ID. Generated protocol evidence is untouched.
+
+### Why
+
+- `packages/coding-agent/src/modes/app-server/protocol/account.ts`: clients can render `displayName (name)` without changing pin/remove behavior or legacy unnamed account payloads.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/modes/app-server/protocol/account.ts` is the host-owned facade for account responses and must describe the actual shared projection.
+
+### Expected merge conflict zones
+
+- LOW: `packages/coding-agent/src/modes/app-server/protocol/account.ts` provider account descriptor.
+
+## Ask-user question transport (2026-09-10)
+
+### What changed
+
+- `packages/coding-agent/src/modes/app-server/server/user-input-bridge.ts` and `packages/coding-agent/src/modes/app-server/server/user-input-types.ts` adapt canonical questions to generated-compatible `item/tool/requestUserInput` requests with namespaced IDs, first-response resolution, replay, progress-driven idle timers, and cancellation.
+- `packages/coding-agent/src/modes/app-server/server/approval-ui-context.ts` delegates `question()` directly without permission-title parsing.
+- `packages/coding-agent/src/modes/app-server/runtime.ts` wires subscription replay, active turn identity, turn-end cancellation, and disposal.
+- `packages/coding-agent/src/modes/app-server/turn-adapter.ts` routes initialized-client answers and progress, returning protocol errors for invalid answers and unknown response IDs.
+- `packages/coding-agent/src/modes/app-server/protocol/methods.ts` registers the additive `item/tool/userInputProgress` client notification outside pinned Codex arrays.
+
+### Why
+
+- App-server clients need the same blocking and asynchronous question outcomes as other UI modes without reusing approval decisions. Idle timeout and the two-hour cap remain owned by the shared pending-question state machine.
+
+### Why an extension could not handle it
+
+- Correlation IDs, inbound protocol routing, subscriber replay, and session lifecycle are app-server-owned. Answers are not logged by this bridge; diagnostics contain no answer payloads.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/modes/app-server/server/user-input-bridge.ts`, `packages/coding-agent/src/modes/app-server/server/user-input-types.ts`, and `packages/coding-agent/src/modes/app-server/server/approval-ui-context.ts`: user-input and approval adapter contracts.
+- `packages/coding-agent/src/modes/app-server/runtime.ts`, `packages/coding-agent/src/modes/app-server/turn-adapter.ts`, and `packages/coding-agent/src/modes/app-server/protocol/methods.ts`: lifecycle wiring and additive protocol routing.
+
 ## Cross-platform daemon process identity and lightweight exit waits (2026-09-01)
 
 ### What changed

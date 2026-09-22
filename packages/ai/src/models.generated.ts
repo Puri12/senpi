@@ -6,6 +6,7 @@ import { AMAZON_BEDROCK_MODELS } from "./providers/amazon-bedrock.models.ts";
 import { ANT_LING_MODELS } from "./providers/ant-ling.models.ts";
 import { ANTHROPIC_MODELS } from "./providers/anthropic.models.ts";
 import { AZURE_OPENAI_RESPONSES_MODELS } from "./providers/azure-openai-responses.models.ts";
+import { BAI_MODELS } from "./providers/bai.models.ts";
 import { BASETEN_MODELS } from "./providers/baseten.models.ts";
 import { CEREBRAS_MODELS } from "./providers/cerebras.models.ts";
 import { CLOUDFLARE_AI_GATEWAY_MODELS } from "./providers/cloudflare-ai-gateway.models.ts";
@@ -17,7 +18,6 @@ import { GOOGLE_MODELS } from "./providers/google.models.ts";
 import { GOOGLE_VERTEX_MODELS } from "./providers/google-vertex.models.ts";
 import { GROQ_MODELS } from "./providers/groq.models.ts";
 import { HUGGINGFACE_MODELS } from "./providers/huggingface.models.ts";
-import { KIMI_CODING_MODELS } from "./providers/kimi-coding.models.ts";
 import { MINIMAX_MODELS } from "./providers/minimax.models.ts";
 import { MINIMAX_CN_MODELS } from "./providers/minimax-cn.models.ts";
 import { MISTRAL_MODELS } from "./providers/mistral.models.ts";
@@ -34,6 +34,7 @@ import { QWEN_TOKEN_PLAN_MODELS } from "./providers/qwen-token-plan.models.ts";
 import { QWEN_TOKEN_PLAN_CN_MODELS } from "./providers/qwen-token-plan-cn.models.ts";
 import { QWEN_TOKEN_PLAN_INDIVIDUAL_MODELS } from "./providers/qwen-token-plan-individual.models.ts";
 import { TOGETHER_MODELS } from "./providers/together.models.ts";
+import { VENICE_MODELS } from "./providers/venice.models.ts";
 import { VERCEL_AI_GATEWAY_MODELS } from "./providers/vercel-ai-gateway.models.ts";
 import { XAI_MODELS } from "./providers/xai.models.ts";
 import { XIAOMI_MODELS } from "./providers/xiaomi.models.ts";
@@ -49,6 +50,7 @@ export const MODELS: {
 	readonly "ant-ling": typeof ANT_LING_MODELS;
 	readonly "anthropic": typeof ANTHROPIC_MODELS;
 	readonly "azure-openai-responses": typeof AZURE_OPENAI_RESPONSES_MODELS;
+	readonly "bai": typeof BAI_MODELS;
 	readonly "baseten": typeof BASETEN_MODELS;
 	readonly "cerebras": typeof CEREBRAS_MODELS;
 	readonly "cloudflare-ai-gateway": typeof CLOUDFLARE_AI_GATEWAY_MODELS;
@@ -60,7 +62,6 @@ export const MODELS: {
 	readonly "google-vertex": typeof GOOGLE_VERTEX_MODELS;
 	readonly "groq": typeof GROQ_MODELS;
 	readonly "huggingface": typeof HUGGINGFACE_MODELS;
-	readonly "kimi-coding": typeof KIMI_CODING_MODELS;
 	readonly "minimax": typeof MINIMAX_MODELS;
 	readonly "minimax-cn": typeof MINIMAX_CN_MODELS;
 	readonly "mistral": typeof MISTRAL_MODELS;
@@ -77,6 +78,7 @@ export const MODELS: {
 	readonly "qwen-token-plan-cn": typeof QWEN_TOKEN_PLAN_CN_MODELS;
 	readonly "qwen-token-plan-individual": typeof QWEN_TOKEN_PLAN_INDIVIDUAL_MODELS;
 	readonly "together": typeof TOGETHER_MODELS;
+	readonly "venice": typeof VENICE_MODELS;
 	readonly "vercel-ai-gateway": typeof VERCEL_AI_GATEWAY_MODELS;
 	readonly "xai": typeof XAI_MODELS;
 	readonly "xiaomi": typeof XIAOMI_MODELS;
@@ -91,6 +93,7 @@ export const MODELS: {
 	"ant-ling": ANT_LING_MODELS,
 	"anthropic": ANTHROPIC_MODELS,
 	"azure-openai-responses": AZURE_OPENAI_RESPONSES_MODELS,
+	"bai": BAI_MODELS,
 	"baseten": BASETEN_MODELS,
 	"cerebras": CEREBRAS_MODELS,
 	"cloudflare-ai-gateway": CLOUDFLARE_AI_GATEWAY_MODELS,
@@ -102,7 +105,6 @@ export const MODELS: {
 	"google-vertex": GOOGLE_VERTEX_MODELS,
 	"groq": GROQ_MODELS,
 	"huggingface": HUGGINGFACE_MODELS,
-	"kimi-coding": KIMI_CODING_MODELS,
 	"minimax": MINIMAX_MODELS,
 	"minimax-cn": MINIMAX_CN_MODELS,
 	"mistral": MISTRAL_MODELS,
@@ -119,6 +121,7 @@ export const MODELS: {
 	"qwen-token-plan-cn": QWEN_TOKEN_PLAN_CN_MODELS,
 	"qwen-token-plan-individual": QWEN_TOKEN_PLAN_INDIVIDUAL_MODELS,
 	"together": TOGETHER_MODELS,
+	"venice": VENICE_MODELS,
 	"vercel-ai-gateway": VERCEL_AI_GATEWAY_MODELS,
 	"xai": XAI_MODELS,
 	"xiaomi": XIAOMI_MODELS,

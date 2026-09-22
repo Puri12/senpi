@@ -1,4 +1,4 @@
-import type { ContinuityReason } from "./session-observability.ts";
+import { type ContinuityReason, sanitizeReason } from "./session-observability.ts";
 import { sentHashPrefixDigest } from "./session-sync.ts";
 
 export type ContinuityEntrySnapshot = {
@@ -39,11 +39,15 @@ export type ContinuityDecisionInput = {
 	modelId: string;
 	fingerprint: { systemPromptHash: string; toolsetHash: string };
 	transcriptAvailable: boolean;
+	/** false only on the config-dir lane, whose per-account credential roots cannot share a transcript root, so cross-account resume is impossible there. */
+	crossAccountResumeSupported: boolean;
 	idleExpired?: boolean;
+	/** Reason the newest ledger record invalidated this session's binding, when one is pending. */
+	invalidationReason?: string;
 };
 
 export type ContinuityDecision =
-	| { kind: "bootstrap" }
+	| { kind: "bootstrap"; reason?: ContinuityReason }
 	| { kind: "delta"; from: number }
 	| { kind: "reattach"; sdkSessionId: string; from: number; reason: ContinuityReason }
 	| { kind: "fork"; sdkSessionId: string; atUuid: string; from: number; reason: ContinuityReason }
@@ -53,6 +57,32 @@ const PENDING_FORK_REASONS: Readonly<Record<string, ContinuityReason>> = {
 	assistant_rewritten: "assistant_rewritten",
 	compaction: "tainted_compaction",
 };
+
+/**
+ * Ledger invalidation reasons that are not themselves observation vocabulary,
+ * mapped onto the closest member. Reasons that ARE members (model_selected,
+ * extensions_removed, assistant_rewritten) pass through `sanitizeReason`, which
+ * also keeps an unknown ledger string from ever reaching an observation.
+ */
+const INVALIDATION_CAUSES: Readonly<Record<string, ContinuityReason>> = {
+	compaction: "tainted_compaction",
+	tree_changed: "branch_diverged",
+	fork: "tainted_fork",
+};
+
+/**
+ * `registry_miss` means what it says: no record was ever found. When the ledger
+ * recorded WHY the binding went away, the cold-seed names that cause instead.
+ * Classification is untouched - only the reason a `bootstrap`/`flatten` reports
+ * changes, and only when it would otherwise be the no-record default.
+ */
+function withRecordedInvalidation(decision: ContinuityDecision, input: ContinuityDecisionInput): ContinuityDecision {
+	if (input.invalidationReason === undefined) return decision;
+	const cause = INVALIDATION_CAUSES[input.invalidationReason] ?? sanitizeReason(input.invalidationReason);
+	if (decision.kind === "bootstrap") return { kind: "bootstrap", reason: cause };
+	if (decision.kind === "flatten" && decision.reason === "registry_miss") return { kind: "flatten", reason: cause };
+	return decision;
+}
 
 function commonPrefixLength(left: readonly string[], right: readonly string[]): number {
 	const limit = Math.min(left.length, right.length);
@@ -96,8 +126,8 @@ function identityDrift(
 ): ContinuityReason | null {
 	if (entry.accountName !== input.accountName) return "account_changed";
 	if (entry.modelId !== input.modelId) return "model_changed";
-	if (entry.systemPromptHash !== input.fingerprint.systemPromptHash) return "options_changed";
-	if (entry.toolsetHash !== input.fingerprint.toolsetHash) return "options_changed";
+	if (entry.systemPromptHash !== input.fingerprint.systemPromptHash) return "system_prompt_changed";
+	if (entry.toolsetHash !== input.fingerprint.toolsetHash) return "toolset_changed";
 	return null;
 }
 
@@ -154,7 +184,18 @@ function withoutUnconfirmedResume(
 function decideFromBinding(input: ContinuityDecisionInput, binding: ContinuityBindingSnapshot): ContinuityDecision {
 	if (!input.transcriptAvailable) return { kind: "flatten", reason: "transcript_missing" };
 	const drift = identityDrift(input, binding);
-	if (drift) return { kind: "flatten", reason: drift };
+	// Model identity drift fails closed: the persisted identity no longer matches the turn.
+	// Account drift flattens only on the config-dir lane, whose per-account roots cannot
+	// share a transcript; on shared-root lanes it falls through like prompt/toolset drift
+	// (senpi#1432), so the retry checkpoint forks a same-turn failover at the pre-turn
+	// boundary and a matching prefix reattaches with reason account_changed.
+	if (drift === "model_changed") return { kind: "flatten", reason: drift };
+	if (drift === "account_changed" && !input.crossAccountResumeSupported)
+		return { kind: "flatten", reason: "cross_root_unsupported" };
+	// Prompt/toolset drift instead reattaches like the live path
+	// (oh-my-openagent#7884) - a restart has no live query, so the resume builds a
+	// fresh query carrying the CURRENT options and hooks, and flattening would
+	// re-send the whole conversation for drift the SDK applies per-query anyway.
 	const retry = retryCheckpointDecision(input, binding);
 	if (retry) return retry;
 	if (binding.sentPrefixHash !== undefined) {
@@ -166,7 +207,7 @@ function decideFromBinding(input: ContinuityDecisionInput, binding: ContinuityBi
 				kind: "reattach",
 				sdkSessionId: binding.sdkSessionId,
 				from: binding.sentCount,
-				reason: "registry_miss",
+				reason: drift ?? "registry_miss",
 			};
 		}
 		return {
@@ -176,7 +217,12 @@ function decideFromBinding(input: ContinuityDecisionInput, binding: ContinuityBi
 	}
 	const shared = commonPrefixLength(binding.sentHashes, input.currentHashes);
 	if (shared === binding.sentCount) {
-		return { kind: "reattach", sdkSessionId: binding.sdkSessionId, from: binding.sentCount, reason: "registry_miss" };
+		return {
+			kind: "reattach",
+			sdkSessionId: binding.sdkSessionId,
+			from: binding.sentCount,
+			reason: drift ?? "registry_miss",
+		};
 	}
 	if (!binding.lastAssistantUuid) return { kind: "flatten", reason: "registry_miss" };
 	return {
@@ -188,47 +234,18 @@ function decideFromBinding(input: ContinuityDecisionInput, binding: ContinuityBi
 	};
 }
 
-export type FailoverLane = "oauth-slots" | "ambient" | "config-dir";
-
-export type FailoverContinuityInput = {
-	authLane: FailoverLane;
-	crossAccountResumeSupported: boolean;
-	entry: { sdkSessionId: string; sentCount: number; lastAssistantUuid: string | null };
-};
-
-/**
- * The config-dir lane keeps each account's credentials inside its own
- * CLAUDE_CONFIG_DIR, and no official SDK API moves a transcript across roots, so
- * its failover is the one declared residual that must still flatten.
- */
-export function decideFailoverContinuity(input: FailoverContinuityInput): ContinuityDecision {
-	const { entry } = input;
-	if (input.authLane === "config-dir") return { kind: "flatten", reason: "cross_root_unsupported" };
-	if (input.crossAccountResumeSupported) {
-		return {
-			kind: "reattach",
-			sdkSessionId: entry.sdkSessionId,
-			from: entry.sentCount,
-			reason: "account_changed",
-		};
-	}
-	if (!entry.lastAssistantUuid) return { kind: "flatten", reason: "branch_boundary_unavailable" };
-	return {
-		kind: "fork",
-		sdkSessionId: entry.sdkSessionId,
-		atUuid: entry.lastAssistantUuid,
-		from: entry.sentCount,
-		reason: "account_changed",
-	};
-}
-
 /**
  * Resume-first: a live session is never abandoned for a flattened re-send. Only a
- * missing transcript or an unrecoverable boundary reaches `flatten`; every other
+ * missing transcript, an unrecoverable boundary, a model identity drift, or account
+ * drift on the config-dir lane on a persisted binding reaches `flatten`; every other
  * divergence resolves to `fork` (same lineage, new branch) or `reattach` (same
  * session, new query).
  */
 export function decideNativeContinuity(input: ContinuityDecisionInput): ContinuityDecision {
+	return withRecordedInvalidation(decideFromState(input), input);
+}
+
+function decideFromState(input: ContinuityDecisionInput): ContinuityDecision {
 	const { entry, binding } = input;
 	if (!entry) {
 		if (!binding) return { kind: "bootstrap" };

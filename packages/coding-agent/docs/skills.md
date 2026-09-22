@@ -67,7 +67,7 @@ For project-level Claude Code skills, add to `.senpi/settings.json`:
 
 1. At startup, senpi scans skill locations and extracts names and descriptions
 2. The system prompt includes available skills in XML format per the [specification](https://agentskills.io/integrate-skills)
-3. When a task matches, the agent uses `read` to load the full SKILL.md (models don't always do this; use prompting or `/skill:name` to force it)
+3. When a task matches, the agent uses `read`, or `bash` when `read` is unavailable, to load the full SKILL.md (models don't always do this; use prompting or `/skill:name` to force it)
 4. The agent follows the instructions, using relative paths to reference scripts and assets
 
 This is progressive disclosure: only descriptions are always in context, full instructions load on-demand.
@@ -270,7 +270,7 @@ cd /path/to/brave-search && bun install
 
 Senpi contributes built-in skills conditionally based on available credentials and capabilities.
 
-**gpt-image-gen** is contributed by the `imagegen` builtin extension when image-generation credentials exist (a stored OpenAI key, `OPENAI_API_KEY`, or a configured OpenAI-compatible gateway). It provides a prompt-crafting guide for `gpt-image-2`, covering detail-maxxing techniques, verbatim quoted render text, revised-prompt feedback loops, and routing guidance for the native server tool vs. the client `generate_image` tool. The skill is absent from `<available_skills>` when no credentials are configured.
+**gpt-image-gen** is contributed by the `imagegen` builtin extension when image-generation credentials exist (stored OpenAI key, `OPENAI_API_KEY`, or an OpenAI-compatible gateway). It is the GPT Image 2.5 prompting guide: tool routing (native `image_generation` server tool vs. the client `generate_image` tool), model selection, a specificity policy (normalize specific requests, add concreteness only to generic ones), verbatim quoted text, reference roles and end-state edits, transparent assets, output formats, multi-turn refinement, and a result checklist. For `generate_image`, `model` selects `gpt-image-2.5-sunburst` (default, most capable), `gpt-image-2.5-flare` (speed), or `gpt-image-2`; `quality` accepts `auto`, `low`, `medium`, `high`, `xhigh`, or `max`; `size` accepts `auto`, presets, or validated custom dimensions; `background`, `output_format` (`png`/`jpeg`/`webp`), `output_compression` (jpeg/webp), and `moderation` shape the output, and the saved extension follows the delivered bytes. `reference_image_paths` supplies 1-5 local images; `mask_image_path` adds an alpha mask for local repaints. Only the native server tool returns a `revised_prompt`.
 
 Skill visibility refreshes at startup and on `/reload`. Mid-session credential changes (login, environment variable updates) take effect on the tool and injector immediately but are reflected in the skill list only after the next reload.
 

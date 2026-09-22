@@ -1,5 +1,41 @@
 # Cache Keep-Alive Extension Changes
 
+## 2026-09-21 - Do not warm parked retained sessions (#1902)
+
+### What changed
+
+- `index.ts` cancels its timer on `session_parked`, rejects rearming while parked even when a detached turn finishes, and rearms on `session_resumed`.
+
+### Why
+
+- Parked sessions deliberately allow the cache to expire rather than paying for periodic warm requests.
+
+### Why an extension could not handle it
+
+- The timer and generation fence are private to this builtin.
+
+### Expected merge conflict zones
+
+- `arm()` guard and session lifecycle subscriptions. Request/cost caps and TUI cadence remain unchanged.
+
+## 2026-09-07 - Keep-alive no longer stands down for an armed goal timer (code-yeongyu/oh-my-openagent#7720)
+
+### What changed
+
+- `index.ts` drops the `goal_continuation_timer_state` subscription, the `goalTimerArmed` flag, the `goal-timer-armed` stop in `arm()`, the same condition in `ping()`, and the now-unused `isGoalTimerState` guard and `GOAL_CONTINUATION_TIMER_STATE_EVENT` import. Every other guard is untouched: keep-alive still requires the opt-in setting, a direct Anthropic Messages model, an idle session with no pending input, and it still honors the per-session request and cost caps and the generation fencing.
+
+### Why
+
+- The stand-down assumed the armed goal timer would itself issue a provider request that refreshes the same prompt cache. That is no longer true: the goal monitor now parks on a long stall backstop and issues no request while wake sources are live, so treating the armed timer as a warm source silently disabled the only loop the user opted into to keep the cache warm during exactly that wait.
+
+### Why an extension could not handle it
+
+- The coupling was hard-wired into this built-in loop's own lifecycle, between its timer and the goal extension's event bus; nothing outside it could remove the stop without disabling the loop.
+
+### Expected merge conflict zones
+
+- LOW: the removed subscription block near the top of the factory, and the two guard conditions in `arm()` and `ping()`.
+
 ## 2026-08-09 - Opt-in native Anthropic warm pings
 
 ### What changed and why

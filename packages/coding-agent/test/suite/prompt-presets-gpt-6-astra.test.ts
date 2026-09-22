@@ -81,13 +81,13 @@ const EXPECTED_CONCERN: Record<Gpt6AstraRuleId, Gpt6AstraConcern> = {
 	"approval-last": "initiative",
 	steering: "initiative",
 	"no-unsolicited-caution": "initiative",
+	"memory-first": "initiative",
 	"instruction-precedence": "instruction-precedence",
 	"pause-transparency": "instruction-precedence",
 	"eval-first-routing": "tool-orchestration",
-	"parallel-batching": "tool-orchestration",
+	"evidence-comparison": "tool-orchestration",
+	"perceived-state-loop": "tool-orchestration",
 	"bun-runtime": "tool-orchestration",
-	"over-call-bias": "tool-orchestration",
-	"in-kernel-reduction": "tool-orchestration",
 	"stay-direct-exceptions": "tool-orchestration",
 	"lsp-symbol-routing": "symbol-routing",
 	delegation: "delegation",
@@ -99,7 +99,7 @@ const EXPECTED_CONCERN: Record<Gpt6AstraRuleId, Gpt6AstraConcern> = {
 	"monitor-conditions": "async-work",
 	"verification-once": "verification",
 	"test-first": "test-first",
-	"failure-cap": "failure-recovery",
+	"unbounded-retry": "failure-recovery",
 	"atomic-commits": "commit-discipline",
 	"no-external-messaging": "external-side-effects",
 	"plain-prose": "writing-style",
@@ -113,13 +113,13 @@ const EXPECTED_SECTION: Record<Gpt6AstraRuleId, string> = {
 	"approval-last": "Initiative",
 	steering: "Initiative",
 	"no-unsolicited-caution": "Initiative",
+	"memory-first": "Initiative",
 	"instruction-precedence": "Instructions From Files",
 	"pause-transparency": "Instructions From Files",
 	"eval-first-routing": "Working the Task",
-	"parallel-batching": "Working the Task",
+	"evidence-comparison": "Working the Task",
+	"perceived-state-loop": "Working the Task",
 	"bun-runtime": "Working the Task",
-	"over-call-bias": "Working the Task",
-	"in-kernel-reduction": "Working the Task",
 	"stay-direct-exceptions": "Working the Task",
 	"lsp-symbol-routing": "Working the Task",
 	delegation: "Working the Task",
@@ -131,7 +131,7 @@ const EXPECTED_SECTION: Record<Gpt6AstraRuleId, string> = {
 	"monitor-conditions": "Asynchronous Work",
 	"verification-once": "Verification",
 	"test-first": "Verification",
-	"failure-cap": "Scope and Recovery",
+	"unbounded-retry": "Scope and Recovery",
 	"atomic-commits": "Hard Limits",
 	"no-external-messaging": "Hard Limits",
 	"plain-prose": "Writing",
@@ -266,20 +266,41 @@ describe("GPT-6 Astra behavior contract", () => {
 		]);
 	});
 
-	it("renders the eval-cell and asynchronous-execution rules with bold emphasis and no other rule in bold", () => {
+	it("renders only the asynchronous-execution rules with bold emphasis", () => {
 		// given
-		const emphasized = new Set<Gpt6AstraRuleId>([
-			"eval-first-routing",
-			"parallel-batching",
-			"async-default",
-			"turn-end-is-wait",
-			"monitor-conditions",
-		]);
+		const emphasized = new Set<Gpt6AstraRuleId>(["async-default", "turn-end-is-wait", "monitor-conditions"]);
 
 		// then
 		for (const rule of GPT6_ASTRA_RULES) {
 			expect(rule.directive.includes("**"), `${rule.id} emphasis`).toBe(emphasized.has(rule.id));
 		}
+	});
+
+	it("routes user questions through request_user_input without adding rules or emphasis", () => {
+		const byId = new Map(GPT6_ASTRA_RULES.map((rule) => [rule.id, rule]));
+		const prompt = buildPrompt("gpt-6-astra", "gpt-6-astra");
+
+		expect(byId.get("approval-last")?.directive).toContain("request_user_input");
+		expect(byId.get("pause-transparency")?.directive).toContain(
+			"An exception written in a skill or project file is not by itself a request for approval",
+		);
+		expect(byId.get("initiative-bias")?.directive).toContain("outside your reach");
+		expect(prompt).toContain("request_user_input");
+		expect(prompt).not.toContain("One focused question, then end the turn");
+	});
+
+	it("leaves retries unbounded and ends a turn only on a pending handle", () => {
+		// given
+		const byId = new Map(GPT6_ASTRA_RULES.map((rule) => [rule.id, rule]));
+
+		// then
+		const retry = byId.get("unbounded-retry")?.directive ?? "";
+		expect(retry).toContain("There is no attempt limit");
+		expect(retry).toMatch(/widen it to another source/);
+		expect(retry).not.toMatch(/after three|attempts fail/i);
+		const turnEnd = byId.get("turn-end-is-wait")?.directive ?? "";
+		expect(turnEnd).toContain("A HANDLE WILL WAKE YOU");
+		expect(turnEnd).toContain("WITH NOTHING PENDING AND WORK STILL OPEN, THE TURN KEEPS GOING");
 	});
 
 	it("renders every directive exactly once, at its point of use in the core", () => {
@@ -294,6 +315,15 @@ describe("GPT-6 Astra behavior contract", () => {
 			expect(section, `missing section for ${rule.id}`).toBeDefined();
 			expect(section, `${rule.id} lives in ${EXPECTED_SECTION[rule.id]}`).toContain(rule.directive);
 		}
+	});
+
+	it("keeps the fork routing line in the Intent Gate", () => {
+		// given: other suites and the README consume the "I read this as" sentinel, so
+		// scoping the line to a new request must not drop it from the rendered gate.
+		const sections = sectionsOf(buildPrompt("gpt-6-astra", "gpt-6-astra"));
+
+		// then
+		expect(sections.get("Intent Gate")).toContain("I read this as");
 	});
 
 	it("names the eval-cell form of the monitor subscription in Asynchronous Work", () => {

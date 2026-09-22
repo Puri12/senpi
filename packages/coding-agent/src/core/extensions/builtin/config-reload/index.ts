@@ -31,6 +31,7 @@ import {
 	refreshSettingsContentSnapshots,
 	updateSettingsContentSnapshot,
 } from "./routine-settings.ts";
+import { bindSessionScopedCallback } from "./session-scoped-callback.ts";
 import {
 	ConfigReloadWatchEngine,
 	createFsWatchEventSource,
@@ -125,16 +126,6 @@ export class ConfigReloadHandoffRegistry<T> {
 
 const reloadHandoffs = new ConfigReloadHandoffRegistry<ReloadHandoff>();
 
-function bindExternalCallback<TArgs extends unknown[], TResult>(
-	callback: (...args: TArgs) => TResult,
-): (...args: TArgs) => TResult {
-	try {
-		return bindToProviderScope(callback);
-	} catch {
-		return callback;
-	}
-}
-
 export interface ConfigReloadExtensionOptions {
 	readonly agentDir?: string;
 	readonly subscribe?: WatchEventSource;
@@ -173,6 +164,7 @@ export function configReloadExtension(pi: ExtensionAPI, options: ConfigReloadExt
 	let activeTargets: ActiveTarget[] = [];
 	let currentContext: ExtensionContext | undefined;
 	let started = false;
+	const watcherClosures: Array<Promise<PromiseSettledResult<void>[]>> = [];
 	let reloadInFlight = false;
 	let deferredNoticeShown = false;
 	let unavailableReloadLogged = false;
@@ -181,12 +173,10 @@ export function configReloadExtension(pi: ExtensionAPI, options: ConfigReloadExt
 	const vetoDeferral = new ReloadVetoDeferral();
 	let changeChain: Promise<void> = Promise.resolve();
 
-	// The engine goes inert the moment close() is called; its unsubscribe loop can
-	// take seconds per watcher, and session_shutdown is awaited by the reload flow.
+	// Cancel registrations synchronously; session_shutdown joins every disposer.
 	const closeWatchers = (): void => {
-		engine?.close().catch((error: unknown) => {
-			logger.error("watcher_error", { path: "watcher teardown", message: errorMessage(error) });
-		});
+		if (!engine) return;
+		watcherClosures.push(Promise.allSettled([engine.close()]));
 		engine = undefined;
 		activeTargets = [];
 	};
@@ -261,7 +251,8 @@ export function configReloadExtension(pi: ExtensionAPI, options: ConfigReloadExt
 	};
 
 	const processChange = async (change: RealChange): Promise<void> => {
-		if (reloadInFlight || !currentContext) return;
+		if (reloadInFlight || !currentContext || !started) return;
+		const changeContext = currentContext;
 		// Suppression state (self-write consumption, routine-diff base) is per path,
 		// so it must be resolved before grouping: a path watched by several
 		// registrations would otherwise be classified once per group and reach the
@@ -291,6 +282,7 @@ export function configReloadExtension(pi: ExtensionAPI, options: ConfigReloadExt
 		);
 		for (const [registrationId, paths] of groups) {
 			const errors = await validateChangedPaths(registrationId, paths, registrations, agentDir, currentContext.cwd);
+			if (!started || currentContext !== changeContext) return;
 			if (errors.length > 0) {
 				rejectChange(currentContext, registrationId, paths, errors, logger, pi);
 				continue;
@@ -319,11 +311,18 @@ export function configReloadExtension(pi: ExtensionAPI, options: ConfigReloadExt
 	};
 
 	const rebuildWatchers = (ctx: ExtensionContext): void => {
+		if (!started || currentContext !== ctx) return;
 		closeWatchers();
 		clearCompactionRecheck();
 		const settingsManager = SettingsManager.create(ctx.cwd, agentDir, { projectTrusted: ctx.isProjectTrusted() });
 		const settings = resolveConfigReloadSettings(settingsManager);
-		if (!settings.enabled || ctx.mode === "print" || ctx.mode === "json") {
+		// Nonpersistent RPC probes need a configuration snapshot, not live OS watches.
+		if (
+			!settings.enabled ||
+			ctx.mode === "print" ||
+			ctx.mode === "json" ||
+			(ctx.mode === "rpc" && ctx.sessionManager.getSessionFile() === undefined)
+		) {
 			pi.events.emit(CONFIG_WATCH_READY, { enabled: false });
 			return;
 		}
@@ -342,8 +341,8 @@ export function configReloadExtension(pi: ExtensionAPI, options: ConfigReloadExt
 			debounceMs: settings.debounceMs,
 			clock: options.clock,
 			hashFile: options.hashFile,
-			onRealChange: bindExternalCallback(enqueueChange),
-			onError: bindExternalCallback((error, path) => {
+			onRealChange: bindSessionScopedCallback(enqueueChange),
+			onError: bindSessionScopedCallback((error, path) => {
 				logger.error("watcher_error", { path, message: errorMessage(error) });
 			}),
 		});
@@ -463,10 +462,12 @@ export function configReloadExtension(pi: ExtensionAPI, options: ConfigReloadExt
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
+		if (!started) return;
 		currentContext = ctx;
 		await flushPending();
 	});
 	pi.on("agent_settled", async (_event, ctx) => {
+		if (!started) return;
 		currentContext = ctx;
 		await flushPending();
 	});
@@ -474,7 +475,7 @@ export function configReloadExtension(pi: ExtensionAPI, options: ConfigReloadExt
 		if (currentContext) rebuildWatchers(currentContext);
 		return { trusted: "undecided" };
 	});
-	pi.on("session_shutdown", (event) => {
+	pi.on("session_shutdown", async (event) => {
 		const closingContext = currentContext;
 		started = false;
 		currentContext = undefined;
@@ -485,6 +486,9 @@ export function configReloadExtension(pi: ExtensionAPI, options: ConfigReloadExt
 		cleanupEventListeners();
 		pending.clear();
 		if (event.reason !== "reload" && closingContext) reloadHandoffs.delete(handoffKey(closingContext));
+		const results = (await Promise.all(watcherClosures.splice(0))).flat();
+		const errors = results.filter((result) => result.status === "rejected").map((result) => result.reason);
+		if (errors.length > 0) throw new AggregateError(errors, "Config watcher shutdown failed");
 	});
 
 	function canRequestReload(ctx: ExtensionContext): boolean {

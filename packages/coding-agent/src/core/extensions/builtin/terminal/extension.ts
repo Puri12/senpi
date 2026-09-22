@@ -5,7 +5,11 @@ import { SettingsManager } from "../../../settings-manager.ts";
 import type { ExtensionAPI, ExtensionContext } from "../../types.ts";
 import { isAnthropicBashEnabled } from "../anthropic-bash/index.ts";
 import { isEvalOnlyRouting } from "../eval-only-routing.ts";
-import { TERMINAL_MONITOR_STATE_EVENT, WAKE_SOURCE_STATE_EVENT } from "../monitor-state-event.ts";
+import {
+	TERMINAL_MONITOR_ENDED_EVENT,
+	TERMINAL_MONITOR_STATE_EVENT,
+	WAKE_SOURCE_STATE_EVENT,
+} from "../monitor-state-event.ts";
 import { createRestartableCommandHandler } from "./durable-command.ts";
 import { createCheckpointedFileRestoreHandler } from "./durable-file.ts";
 import { acquireTerminalLease, releaseTerminalLease } from "./manifest-lease.ts";
@@ -56,6 +60,7 @@ interface TerminalExtensionState {
 	/** Manifest recorder; present only while this process owns the session's lease. */
 	manifestWriter: TerminalManifestWriter | null;
 	recordedBackgroundIds: Set<string>;
+	parked: boolean;
 }
 
 /** Tests and SDK callers may hand partial contexts without a session manager. */
@@ -84,8 +89,12 @@ function createBundle(state: TerminalExtensionState): TerminalSessionBundle {
 function bundleSinks(pi: ExtensionAPI, state: TerminalExtensionState): TerminalEventSinks {
 	return {
 		onMonitorEvent: (event) => state.monitorNotifier?.notifyEvent(event),
-		onMonitorState: (snapshot) => {
-			state.statusTicker.sync(snapshot);
+		onMonitorEnded: (event) => {
+			pi.events?.emit(TERMINAL_MONITOR_ENDED_EVENT, event);
+			pi.rpc?.emit(TERMINAL_MONITOR_ENDED_EVENT, event);
+		},
+		onMonitorState: (snapshot, transition = true) => {
+			if (!state.parked) state.statusTicker.sync(snapshot);
 			const payload = {
 				activeCount: snapshot.length,
 				monitors: snapshot.map((entry) => ({
@@ -93,10 +102,17 @@ function bundleSinks(pi: ExtensionAPI, state: TerminalExtensionState): TerminalE
 					description: entry.description,
 					paused: entry.paused,
 					startedAtMs: entry.startedAtMs,
+					command: entry.command,
+					filter: entry.filter,
+					persistent: entry.persistent,
+					deadlineMs: entry.deadlineMs,
+					fireCount: entry.fireCount,
+					lastFiredAtMs: entry.lastFiredAtMs,
 				})),
 			};
 			pi.events?.emit(TERMINAL_MONITOR_STATE_EVENT, payload);
 			pi.rpc?.emit(TERMINAL_MONITOR_STATE_EVENT, payload);
+			if (!transition) return;
 			pi.events?.emit(WAKE_SOURCE_STATE_EVENT, {
 				source: "terminal-monitors",
 				activeCount: snapshot.length,
@@ -137,6 +153,7 @@ function buildToolContext(pi: ExtensionAPI, state: TerminalExtensionState): Term
 		// settings-configured bundle and tears down any earlier one.
 		if (!state.bundle) {
 			state.bundle = createBundle(state);
+			state.bundle.monitors.setParked(state.parked);
 			state.bundle.bind(bundleSinks(pi, state));
 		}
 		return state.bundle;
@@ -395,6 +412,7 @@ export function registerTerminalExtension(pi: ExtensionAPI): void {
 		lease: null,
 		manifestWriter: null,
 		recordedBackgroundIds: new Set(),
+		parked: false,
 	};
 	const toolCtx = buildToolContext(pi, state);
 
@@ -450,6 +468,18 @@ export function registerTerminalExtension(pi: ExtensionAPI): void {
 			await adoptPersistedTerminalState(pi, state, toolCtx, state.bundle, sessionKey);
 		}
 		syncToolset(pi, state);
+	});
+
+	pi.on("session_parked", () => {
+		state.parked = true;
+		state.bundle?.monitors.setParked(true);
+		state.statusTicker.stop();
+	});
+
+	pi.on("session_resumed", () => {
+		state.parked = false;
+		state.bundle?.monitors.setParked(false);
+		if (state.bundle) state.statusTicker.sync(state.bundle.monitors.snapshot());
 	});
 
 	pi.on("model_select", async (event, ctx) => {

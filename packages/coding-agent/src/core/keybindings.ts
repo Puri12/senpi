@@ -17,6 +17,7 @@ export interface AppKeybindings {
 	"app.exit": true;
 	"app.suspend": true;
 	"app.thinking.cycle": true;
+	"app.thinking.save": true;
 	"app.model.cycleForward": true;
 	"app.model.cycleBackward": true;
 	"app.model.select": true;
@@ -28,14 +29,18 @@ export interface AppKeybindings {
 	"app.message.copy": true;
 	"app.message.followUp": true;
 	"app.message.dequeue": true;
+	"app.question.answer": true;
+	"app.question.next": true;
 	"app.clipboard.pasteImage": true;
 	"app.session.new": true;
 	"app.session.tree": true;
 	"app.session.fork": true;
 	"app.session.resume": true;
+	"app.session.renameCurrent": true;
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
 	"app.tree.editLabel": true;
+	"app.tree.editMessage": true;
 	"app.tree.toggleLabelTimestamp": true;
 	"app.session.togglePath": true;
 	"app.session.toggleSort": true;
@@ -73,6 +78,9 @@ declare module "@earendil-works/pi-tui" {
 
 const windowsKeybindings = useWindowsKeybindings();
 
+export const QUESTION_ANSWER_PRIMARY_KEY = "alt+up" satisfies KeyId;
+export const QUESTION_ANSWER_FALLBACK_KEY = "alt+a" satisfies KeyId;
+
 export const KEYBINDINGS = {
 	...TUI_KEYBINDINGS,
 	"tui.editor.undo": {
@@ -101,6 +109,10 @@ export const KEYBINDINGS = {
 	"app.thinking.cycle": {
 		defaultKeys: "shift+tab",
 		description: "Cycle thinking level",
+	},
+	"app.thinking.save": {
+		defaultKeys: "ctrl+s",
+		description: "Save thinking level",
 	},
 	"app.model.cycleForward": {
 		defaultKeys: "ctrl+p",
@@ -137,6 +149,14 @@ export const KEYBINDINGS = {
 		defaultKeys: windowsKeybindings ? "alt+q" : "alt+up",
 		description: "Restore queued messages",
 	},
+	"app.question.answer": {
+		defaultKeys: [QUESTION_ANSWER_PRIMARY_KEY, QUESTION_ANSWER_FALLBACK_KEY],
+		description: "Open the pending question",
+	},
+	"app.question.next": {
+		defaultKeys: "alt+down",
+		description: "Show the next pending question",
+	},
 	"app.clipboard.pasteImage": {
 		defaultKeys: windowsKeybindings ? "alt+v" : "ctrl+v",
 		description: "Paste image from clipboard (text fallback)",
@@ -145,6 +165,7 @@ export const KEYBINDINGS = {
 	"app.session.tree": { defaultKeys: [], description: "Open session tree" },
 	"app.session.fork": { defaultKeys: [], description: "Fork current session" },
 	"app.session.resume": { defaultKeys: [], description: "Resume a session" },
+	"app.session.renameCurrent": { defaultKeys: [], description: "Rename the current session" },
 	"app.tree.foldOrUp": {
 		defaultKeys: process.platform === "darwin" ? ["alt+left", "ctrl+left"] : ["ctrl+left", "alt+left"],
 		description: "Fold tree branch or move up",
@@ -156,6 +177,10 @@ export const KEYBINDINGS = {
 	"app.tree.editLabel": {
 		defaultKeys: "shift+l",
 		description: "Edit tree label",
+	},
+	"app.tree.editMessage": {
+		defaultKeys: "ctrl+e",
+		description: "Edit the selected assistant response, or reopen a user message in the editor",
 	},
 	"app.tree.toggleLabelTimestamp": {
 		defaultKeys: "shift+t",
@@ -293,6 +318,7 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	treeFoldOrUp: "app.tree.foldOrUp",
 	treeUnfoldOrDown: "app.tree.unfoldOrDown",
 	treeEditLabel: "app.tree.editLabel",
+	treeEditMessage: "app.tree.editMessage",
 	treeToggleLabelTimestamp: "app.tree.toggleLabelTimestamp",
 	toggleSessionPath: "app.session.togglePath",
 	toggleSessionSort: "app.session.toggleSort",

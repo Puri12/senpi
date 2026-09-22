@@ -1,6 +1,6 @@
 {
 	"name": "@code-yeongyu/senpi-server",
-	"version": "2026.9.5-3",
+	"version": "2026.9.22",
 	"description": "experimental server package for senpi",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -27,7 +27,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
-		"build": "tsc -p tsconfig.build.json",
+		"build": "tsgo -p tsconfig.build.json",
 		"test": "vitest --run",
 		"typecheck": "tsc -p tsconfig.test.json",
 		"prepublishOnly": "npm run clean && npm run build"
@@ -47,12 +47,14 @@
 		"node": ">=22.19.0"
 	},
 	"dependencies": {
-		"@earendil-works/pi-ai": "^2026.9.5-3",
-		"@earendil-works/pi-protocol": "^2026.9.5-3"
+		"@earendil-works/chord": "0.85.1",
+		"@earendil-works/pi-agent-core": "^2026.9.22",
+		"@earendil-works/pi-ai": "^2026.9.22",
+		"@earendil-works/pi-protocol": "^2026.9.22"
 	},
 	"devDependencies": {
 		"shx": "0.4.0",
-		"vitest": "4.1.11"
+		"vitest": "5.0.1"
 	},
 	"private": true
 }

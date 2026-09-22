@@ -244,7 +244,7 @@ function senpi_bridge_request(path::String, payload)
         parsed isa AbstractDict || error("Bridge returned invalid JSON")
         get(parsed, "ok", false) === true && return get(parsed, "value", nothing)
         failure = get(parsed, "error", parsed)
-        error(failure isa AbstractDict ? string(get(failure, "message", failure)) : string(failure))
+        throw(SenpiBridgeError(failure isa AbstractDict ? string(get(failure, "message", failure)) : string(failure), failure isa AbstractDict ? get(failure, "code", nothing) : nothing))
     finally
         close(socket)
     end

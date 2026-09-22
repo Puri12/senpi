@@ -25,7 +25,7 @@ For the JSONL file format and SessionManager API, see [Session Format](session-f
 |---------|-------------|
 | `/resume` | Browse and select previous sessions |
 | `/new` | Start a new session |
-| `/name <name>` | Set the current session display name |
+| `/rename [name]` | Rename the current session (`/name` is an alias) |
 | `/session` | Show session info |
 | `/tree` | Navigate the current session tree |
 | `/fork` | Create a new session from a previous user message |
@@ -51,10 +51,10 @@ When available, senpi uses the `trash` CLI for deletion instead of permanently r
 
 ## Naming Sessions
 
-Use `/name <name>` to set a human-readable session name:
+Use `/rename [name]` to set a human-readable session name. With an argument it sets the name immediately; without one it opens an inline editor prefilled with the current name (Enter commits, Esc cancels, empty names are rejected). `/name` is an alias.
 
 ```text
-/name Refactor auth module
+/rename Refactor auth module
 ```
 
 Set the name at startup with `--name` or `-n`:
@@ -114,6 +114,8 @@ Selecting an assistant, tool, compaction, or other non-user entry:
 3. Lets you continue from that point.
 
 Selecting the root user message resets the leaf to an empty conversation and places the original prompt in the editor.
+
+RPC clients get the same rule without an interactive picker. `navigate_tree` with `entryId` applies this selection behavior by default on the host and returns the text that would have gone to the editor as `editorText`; `edit_user_message` goes one step further and writes the edited prompt into the session as a new branch. To resume an existing branch at its exact entry instead (including an unanswered edited user message), use `navigate_tree` with `intent: "resume"`: the requested entry stays the leaf and no editor text is returned. Both intents are described in [RPC](rpc.md#navigate_tree).
 
 ## `/tree`, `/fork`, and `/clone`
 

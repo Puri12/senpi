@@ -48,6 +48,7 @@ import {
 	resolveGrammarConstrainedSampling,
 	resolveJsonSchemaStrictSampling,
 } from "./constrained-sampling.ts";
+import { withResponsesCompletionGrace } from "./responses-completion-grace.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 // =============================================================================
@@ -909,13 +910,14 @@ export async function processResponsesStream<TApi extends Api>(
 		output.rawStopReason = incompleteReason ? `${status}.${incompleteReason}` : status;
 		const mappedStop = mapStopReason(status, incompleteReason);
 		output.stopReason = mappedStop.stopReason;
-		output.errorMessage = mappedStop.errorMessage;
+		if (mappedStop.errorMessage === undefined) delete output.errorMessage;
+		else output.errorMessage = mappedStop.errorMessage;
 		if (output.content.some((b) => b.type === "toolCall") && output.stopReason === "stop") {
 			output.stopReason = "toolUse";
 		}
 	};
 
-	for await (const event of openaiStream) {
+	for await (const event of withResponsesCompletionGrace(openaiStream)) {
 		if (event.type === "response.created") {
 			output.responseId = event.response.id;
 		} else if (event.type === "response.output_item.added") {

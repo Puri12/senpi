@@ -6,9 +6,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { processBunRuntimeOptions, resolveBunReexec } from "./bun-runtime.ts";
 import { enableStartupCompileCache } from "./compile-cache.ts";
-import { APP_NAME, DISPLAY_VERSION, getPackageDir } from "./config.ts";
+import { APP_NAME, DISPLAY_VERSION, getPackageDir, isBundledNode } from "./config.ts";
 import { hasInheritedInspectorOption, releaseInheritedInspectorForChild } from "./inspector-policy.ts";
 import { handleBootstrapSelfUpdate } from "./self-update-bootstrap.ts";
+
+// Upstream's `cli/setup.ts` helper is deliberately not used here: this launcher only decides the
+// runtime and process structure, and `cli-main.ts` performs the equivalent process/title/env/http
+// setup for both entry paths (Node launcher and the Bun binary).
 
 /**
  * Hand a Bun-installed CLI to Bun before anything else runs.
@@ -85,6 +89,9 @@ function isMissingBundledWorkspaceDependencies(packageDir: string): boolean {
 	});
 }
 
+/** Marks the child a bundled entry spawned for its exec arguments, so it never spawns again. */
+const ISOLATED_CHILD_ENV = "SENPI_CLI_ISOLATED_CHILD";
+
 /**
  * Decide whether the agent needs its own process.
  *
@@ -97,16 +104,26 @@ function isMissingBundledWorkspaceDependencies(packageDir: string): boolean {
  * anything the agent spawns can inherit it.
  */
 function requiresIsolatedProcess(): boolean {
+	// The bundled entry re-executes itself rather than a sibling, so the child would otherwise see the
+	// same exec arguments and spawn again forever. The marker is read before anything else runs.
+	if (process.env[ISOLATED_CHILD_ENV] === "1") return false;
 	return process.execArgv.length > 0 || hasInheritedInspectorOption();
 }
 
 async function spawnFullCli(): Promise<number> {
 	const extension = import.meta.url.endsWith(".ts") ? ".ts" : ".js";
-	const fullCliPath = fileURLToPath(new URL(`./cli-main${extension}`, import.meta.url));
+	// The bundle inlines `cli-main`, so no sibling module exists next to it: resolving one produced
+	// `Module not found .../dist/bundle/cli-main.js` for every launch carrying exec arguments. The
+	// bundled entry therefore replays the arguments onto a copy of itself, marked so the child loads
+	// the agent in process. An unbundled install keeps spawning its sibling exactly as before.
+	const fullCliPath = isBundledNode
+		? fileURLToPath(import.meta.url)
+		: fileURLToPath(new URL(`./cli-main${extension}`, import.meta.url));
 	releaseInheritedInspectorForChild();
+	const childEnvironment = isBundledNode ? { ...process.env, [ISOLATED_CHILD_ENV]: "1" } : process.env;
 	return await new Promise<number>((resolve, reject) => {
 		const child = spawn(process.execPath, [...process.execArgv, fullCliPath, ...args], {
-			env: process.env,
+			env: childEnvironment,
 			stdio: "inherit",
 		});
 		child.on("error", (error) => {
@@ -126,6 +143,16 @@ async function spawnFullCli(): Promise<number> {
 if (isRootCommand(args) && (args.includes("--version") || args.includes("-v"))) {
 	console.log(DISPLAY_VERSION);
 	process.exit();
+}
+
+// Help is static text plus the flags extensions registered, so a launch that already knows those
+// flags must not import the engine graph to print them. The import stays dynamic for the same
+// reason `cli-main` is: a static one would evaluate that graph before this answer.
+if (isRootCommand(args) && args.some((arg) => arg === "--help" || arg === "-h")) {
+	const { tryPrintHelpWithoutEngine } = await import("./cli/help-fast-path.ts");
+	if (tryPrintHelpWithoutEngine(args)) {
+		process.exit();
+	}
 }
 
 if (isMissingBundledWorkspaceDependencies(getPackageDir())) {

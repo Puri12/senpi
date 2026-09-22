@@ -166,4 +166,38 @@ describe("claude-sdk-oauth session reattach", () => {
 		await expect(reattachSession({ binding: binding(), options: options() })).rejects.toThrow("resume rejected");
 		expect(getSession(SESSION_ID)).toBeUndefined();
 	});
+
+	it("keeps a successfully initialized query after request cleanup aborts", async () => {
+		const controller = new AbortController();
+		overrideSessionRegistryBoundary({ queryFactory: () => fakeQuery() });
+
+		await reattachSession({ binding: binding(), options: options(), signal: controller.signal });
+		controller.abort();
+		await Promise.resolve();
+
+		expect(getSession(SESSION_ID)).toBeDefined();
+	});
+
+	it("closes a query when initialization is still pending and the request aborts", async () => {
+		const controller = new AbortController();
+		let resolveInitialization: ((value: { session_id: string }) => void) | undefined;
+		overrideSessionRegistryBoundary({
+			queryFactory: () => ({
+				async *[Symbol.asyncIterator](): AsyncGenerator<SDKMessage> {},
+				async interrupt() {},
+				close() {},
+				initializationResult: () =>
+					new Promise((resolve) => {
+						resolveInitialization = resolve;
+					}),
+			}),
+		});
+
+		const reattach = reattachSession({ binding: binding(), options: options(), signal: controller.signal });
+		controller.abort();
+
+		await expect(reattach).rejects.toThrow("reattach aborted");
+		expect(getSession(SESSION_ID)).toBeUndefined();
+		resolveInitialization?.({ session_id: SDK_SESSION_ID });
+	});
 });

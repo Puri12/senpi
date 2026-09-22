@@ -34,6 +34,7 @@ function writeShrinkwrap(root, packages) {
 }
 
 const BUNDLED_WORKSPACE_NAMES = [
+	"@earendil-works/chord",
 	"@earendil-works/pi-agent-core",
 	"@earendil-works/pi-ai",
 	"@earendil-works/pi-pty",
@@ -45,6 +46,7 @@ const VENDORED_WORKSPACE_NAMES = ["@earendil-works/pi-client", "@earendil-works/
 const ALL_WORKSPACE_NAMES = [...BUNDLED_WORKSPACE_NAMES, ...VENDORED_WORKSPACE_NAMES];
 
 const BUNDLED_WORKSPACE_PACKAGE_NAMES = new Map([
+	["chord", "@earendil-works/chord"],
 	["agent", "@earendil-works/pi-agent-core"],
 	["ai", "@earendil-works/pi-ai"],
 	["client", "@earendil-works/pi-client"],
@@ -72,6 +74,17 @@ function bundledWorkspaceFiles(workspace) {
 	}
 	if (workspace === "senpi-codemode") {
 		return ["package.json", "src/index.ts", "src/kernels/py/prelude.py"];
+	}
+	if (workspace === "agent") {
+		return [
+			"package.json",
+			"dist/index.js",
+			"assets/tree-sitter/javascript.wasm",
+			"assets/tree-sitter/web-tree-sitter.wasm",
+		];
+	}
+	if (workspace === "chord") {
+		return ["package.json", "dist/index.js", "dist/context/index.js"];
 	}
 	if (workspace === "client") {
 		return ["package.json", "dist/index.js", "dist/index.d.ts", "dist/client.d.ts"];
@@ -123,7 +136,7 @@ describe("prepareSenpiBundledWorkspaces", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "senpi-bundle-workspaces-"));
 		writeShrinkwrap(tempDir, { "": { dependencies: {} } });
 		writeCodingAgentManifest(tempDir);
-		for (const workspace of ["agent", "ai", "client", "protocol", "pty", "telemetry", "tui", "senpi-codemode"]) {
+		for (const workspace of ["chord", "agent", "ai", "client", "protocol", "pty", "telemetry", "tui", "senpi-codemode"]) {
 			writeBundledWorkspace(tempDir, workspace);
 		}
 
@@ -153,7 +166,7 @@ describe("prepareSenpiBundledWorkspaces", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "senpi-bundle-missing-pty-prebuild-"));
 		writeShrinkwrap(tempDir, { "": { dependencies: {} } });
 		writeCodingAgentManifest(tempDir);
-		for (const workspace of ["agent", "ai", "client", "protocol", "telemetry", "tui", "senpi-codemode"]) {
+		for (const workspace of ["chord", "agent", "ai", "client", "protocol", "telemetry", "tui", "senpi-codemode"]) {
 			writeBundledWorkspace(tempDir, workspace);
 		}
 		writeBundledWorkspace(tempDir, "pty");
@@ -222,11 +235,12 @@ describe("prepareSenpiBundledWorkspaces", () => {
 				{ name: `@earendil-works/${packageName}`, version: "stale" },
 			);
 		}
-		for (const workspace of ["agent", "ai", "client", "protocol", "pty", "telemetry", "tui", "senpi-codemode"]) {
+		for (const workspace of ["chord", "agent", "ai", "client", "protocol", "pty", "telemetry", "tui", "senpi-codemode"]) {
 			writeBundledWorkspace(tempDir, workspace);
 		}
-		for (const name of ["cross-spawn", "which"]) {
-			writeJson(join(tempDir, "node_modules", name, "package.json"), { name, version: "1.0.0" });
+		// Installed copies carry the manifest versions: staging refuses any other version.
+		for (const [name, version] of [["cross-spawn", "7.0.6"], ["which", "2.0.2"]]) {
+			writeJson(join(tempDir, "node_modules", name, "package.json"), { name, version });
 		}
 		for (const name of ["@babel/parser", "@babel/types", "@babel/unlocked", "typebox"]) {
 			writeJson(join(tempDir, "packages", "senpi-codemode", "node_modules", name, "package.json"), {
@@ -285,13 +299,16 @@ describe("prepareSenpiBundledWorkspaces", () => {
 		assert.deepEqual(manifest.files, ["dist", "README.md", "vendor"]);
 		assert.deepEqual(manifest.dependencies, {
 			"@code-yeongyu/senpi-codemode": "2026.7.22",
+			// Chord keeps upstream's own release line, so its edge stays a plain range instead of a
+			// fork alias; the packed copy still ships (issue #1632).
+			"@earendil-works/chord": "^2026.7.22",
 			"@earendil-works/pi-agent-core": "npm:@code-yeongyu/senpi-agent-core@2026.7.22",
 			"@earendil-works/pi-ai": "npm:@code-yeongyu/senpi-ai@2026.7.22",
 			"@earendil-works/pi-pty": "npm:@code-yeongyu/senpi-pty@2026.7.22",
 			"@earendil-works/pi-telemetry": "npm:@code-yeongyu/senpi-telemetry@2026.7.22",
 			"@earendil-works/pi-tui": "npm:@code-yeongyu/senpi-tui@2026.7.22",
-			"cross-spawn": "1.0.0",
-			which: "1.0.0",
+			"cross-spawn": "7.0.6",
+			which: "2.0.2",
 		});
 		const stagedAgentManifest = JSON.parse(
 			readFileSync(
@@ -352,7 +369,7 @@ describe("prepareSenpiBundledWorkspaces", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "senpi-vendor-specifier-leak-"));
 		writeShrinkwrap(tempDir, { "": { dependencies: {} } });
 		writeCodingAgentManifest(tempDir);
-		for (const workspace of ["agent", "ai", "client", "protocol", "pty", "telemetry", "tui", "senpi-codemode"]) {
+		for (const workspace of ["chord", "agent", "ai", "client", "protocol", "pty", "telemetry", "tui", "senpi-codemode"]) {
 			writeBundledWorkspace(tempDir, workspace);
 		}
 		const leakedImport = join(tempDir, "packages", "coding-agent", "dist", "leak.js");
@@ -369,7 +386,7 @@ describe("prepareSenpiBundledWorkspaces", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "senpi-vendor-runtime-dependency-"));
 		writeShrinkwrap(tempDir, { "": { dependencies: {} } });
 		writeCodingAgentManifest(tempDir);
-		for (const workspace of ["agent", "ai", "client", "protocol", "pty", "telemetry", "tui", "senpi-codemode"]) {
+		for (const workspace of ["chord", "agent", "ai", "client", "protocol", "pty", "telemetry", "tui", "senpi-codemode"]) {
 			writeBundledWorkspace(tempDir, workspace);
 		}
 		writeJson(join(tempDir, "packages", "protocol", "package.json"), {
@@ -391,7 +408,7 @@ describe("prepareSenpiBundledWorkspaces", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "senpi-bundle-missing-pty-loader-"));
 		writeShrinkwrap(tempDir, { "": { dependencies: {} } });
 		writeCodingAgentManifest(tempDir);
-		for (const workspace of ["agent", "ai", "client", "protocol", "telemetry", "tui"]) {
+		for (const workspace of ["chord", "agent", "ai", "client", "protocol", "telemetry", "tui"]) {
 			writeBundledWorkspace(tempDir, workspace);
 		}
 		writeBundledWorkspace(tempDir, "pty");

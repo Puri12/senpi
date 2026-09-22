@@ -91,6 +91,7 @@ export const COMPLETIONS_COMPAT = {
 	| "toolSchemaFlavor"
 	| "thinkingTokenBudgetField"
 	| "vllmPriority"
+	| "veniceParameters"
 > & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
 	toolCallFormat?: OpenAICompletionsCompat["toolCallFormat"];

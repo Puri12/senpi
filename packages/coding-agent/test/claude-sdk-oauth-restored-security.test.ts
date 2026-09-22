@@ -51,6 +51,7 @@ function baseInput(overrides: Partial<ContinuityDecisionInput> = {}): Continuity
 		modelId: "claude-opus-4-5",
 		fingerprint: { systemPromptHash: "prompt-v1", toolsetHash: "tools-v1" },
 		transcriptAvailable: true,
+		crossAccountResumeSupported: true,
 		...overrides,
 	};
 }
@@ -90,18 +91,27 @@ afterEach(() => {
 
 describe("claude-sdk-oauth restored security", () => {
 	describe("decideNativeContinuity", () => {
-		it.each([
-			["account", { accountName: "secondary" }, "account_changed"],
-			["model", { modelId: "claude-sonnet-5" }, "model_changed"],
-			[
-				"system-prompt",
-				{ fingerprint: { systemPromptHash: "prompt-v2", toolsetHash: "tools-v1" } },
-				"options_changed",
-			],
-			["toolset", { fingerprint: { systemPromptHash: "prompt-v1", toolsetHash: "tools-v2" } }, "options_changed"],
-		] as const)("cold-seeds a persisted binding when %s drifts", (_label, override, reason) => {
-			const decision = decideNativeContinuity(baseInput(override));
-			expect(decision).toEqual({ kind: "flatten", reason });
+		it("cold-seeds a persisted binding when the model drifts", () => {
+			const decision = decideNativeContinuity(baseInput({ modelId: "claude-sonnet-5" }));
+			expect(decision).toEqual({ kind: "flatten", reason: "model_changed" });
+		});
+
+		// senpi#1432: account drift is a lane question, not a lineage-identity question.
+		it("reattaches a persisted binding when the account drifts on a shared-root lane", () => {
+			const decision = decideNativeContinuity(baseInput({ accountName: "secondary" }));
+			expect(decision).toEqual({
+				kind: "reattach",
+				sdkSessionId: SDK_SESSION_ID,
+				from: 2,
+				reason: "account_changed",
+			});
+		});
+
+		it("cold-seeds a persisted binding when the account drifts on the config-dir lane", () => {
+			const decision = decideNativeContinuity(
+				baseInput({ accountName: "secondary", crossAccountResumeSupported: false }),
+			);
+			expect(decision).toEqual({ kind: "flatten", reason: "cross_root_unsupported" });
 		});
 
 		it.each([
@@ -110,11 +120,23 @@ describe("claude-sdk-oauth restored security", () => {
 			[
 				"system-prompt",
 				{ fingerprint: { systemPromptHash: "prompt-v2", toolsetHash: "tools-v1" } },
-				"options_changed",
+				"system_prompt_changed",
 			],
-			["toolset", { fingerprint: { systemPromptHash: "prompt-v1", toolsetHash: "tools-v2" } }, "options_changed"],
+			["toolset", { fingerprint: { systemPromptHash: "prompt-v1", toolsetHash: "tools-v2" } }, "toolset_changed"],
 		] as const)("keeps live-entry reattach behavior when %s drifts", (_label, override, reason) => {
 			const decision = decideNativeContinuity(baseInput({ entry: liveEntry(), ...override }));
+			expect(decision).toMatchObject({ kind: "reattach", reason, sdkSessionId: SDK_SESSION_ID, from: 2 });
+		});
+
+		it.each([
+			[
+				"system-prompt",
+				{ fingerprint: { systemPromptHash: "prompt-v2", toolsetHash: "tools-v1" } },
+				"system_prompt_changed",
+			],
+			["toolset", { fingerprint: { systemPromptHash: "prompt-v1", toolsetHash: "tools-v2" } }, "toolset_changed"],
+		] as const)("reattaches a persisted binding when %s drifts (#7884)", (_label, override, reason) => {
+			const decision = decideNativeContinuity(baseInput(override));
 			expect(decision).toMatchObject({ kind: "reattach", reason, sdkSessionId: SDK_SESSION_ID, from: 2 });
 		});
 	});

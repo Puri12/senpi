@@ -18,6 +18,7 @@ import {
 import { CONFIG_DIR_NAME } from "../../../config.ts";
 import type { PathMetadata, ResolvedPaths, ResolvedResource } from "../../../core/package-manager.ts";
 import type { PackageSource, SettingsManager } from "../../../core/settings-manager.ts";
+import type { SourceScope } from "../../../core/source-info.ts";
 import { canonicalizePath, isLocalPath, resolvePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -57,7 +58,7 @@ interface ResourceSubgroup {
 interface ResourceGroup {
 	key: string;
 	label: string;
-	scope: "user" | "project" | "temporary";
+	scope: SourceScope;
 	origin: "package" | "top-level";
 	source: string;
 	subgroups: ResourceSubgroup[];

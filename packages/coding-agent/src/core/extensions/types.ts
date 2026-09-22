@@ -67,7 +67,7 @@ import type {
 	SessionManager,
 } from "../session-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
-import type { SourceInfo } from "../source-info.ts";
+import type { SourceInfo, SourceScope } from "../source-info.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import type { BashOperations } from "../tools/bash.ts";
 import type { EditToolDetails } from "../tools/edit.ts";
@@ -87,7 +87,9 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
+import type { ReadClassifier } from "../tools/read-classifiers.ts";
 import type { McpServerDeclaration } from "./builtin/mcp/config-schema.ts";
+import type { ExtensionKernelTools } from "./kernel-tools-context.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
@@ -141,6 +143,29 @@ export interface WorkingIndicatorOptions {
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
 export type EditorFactory = (tui: TUI, theme: EditorTheme, keybindings: KeybindingsManager) => EditorComponent;
 
+/** Canonical multi-question prompt shown through ExtensionUIContext.question. */
+export interface QuestionRequest {
+	requestId: string;
+	questions: Array<{
+		id: string;
+		header: string;
+		question: string;
+		options: Array<{ label: string; description?: string }>;
+		multiSelect: boolean;
+	}>;
+	waitForAnswer: boolean;
+	timeoutMs: number;
+}
+
+/** Outcome of ExtensionUIContext.question. */
+export interface QuestionResponse {
+	status: "answered" | "comment-submitted" | "timed_out" | "cancelled" | "orphaned-after-restart" | "unavailable";
+	answers: Record<string, { selected: string[]; text?: string }>;
+	comment?: string;
+	unanswered: string[];
+	autoResolvedAfterMs?: number;
+}
+
 /**
  * UI context for extensions to request interactive UI.
  * Each mode (interactive, RPC, print) provides its own implementation.
@@ -154,6 +179,17 @@ export interface ExtensionUIContext {
 
 	/** Show a text input dialog. */
 	input(title: string, placeholder?: string, opts?: ExtensionUIDialogOptions): Promise<string | undefined>;
+
+	/**
+	 * Show a multi-question prompt and resolve with the user's answers, comment, cancel, or timeout.
+	 * Optional so hand-built contexts and modes that do not implement it remain valid.
+	 */
+	question?(
+		request: QuestionRequest,
+		opts?: ExtensionUIDialogOptions & {
+			onProgress?: (draft: { answers?: QuestionResponse["answers"]; comment?: string }) => void;
+		},
+	): Promise<QuestionResponse>;
 
 	/** Show a notification to the user. */
 	notify(message: string, type?: "info" | "warning" | "error"): void;
@@ -416,14 +452,25 @@ export interface ExtensionContext {
 	cwd: string;
 	/** Agent state directory (settings, logs, sessions) resolved for this session. */
 	agentDir: string;
+	/** Resolved paths of loaded extensions, including synthetic builtin/inline identifiers. */
+	readonly loadedExtensionPaths?: readonly string[];
 	/** Session manager (read-only) */
 	sessionManager: ReadonlySessionManager;
+	/** Absolute goal-store path for this session; reading it does not create the file. */
+	readonly goalStoreFile?: string;
 	/** Model registry for API key resolution */
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined) */
 	model: Model<any> | undefined;
 	/** Current service tier for the active model (from -fast suffix or scoped model config) */
 	serviceTier: ServiceTier | undefined;
+	/**
+	 * The tier the session's requests carry right now: `serviceTier`, promoted to `"priority"`
+	 * while session fast mode is on. Hosts that spawn delegated sessions read this to inherit the
+	 * parent's effective execution tier. Optional so hand-built contexts stay valid; readers fall
+	 * back to `serviceTier`.
+	 */
+	effectiveServiceTier?: ServiceTier | undefined;
 	/** Models scoped to this session. Empty when all available models are usable. */
 	scopedModels: readonly ScopedModel[];
 	/** Current thinking level, when provided by the session runtime. */
@@ -434,6 +481,16 @@ export interface ExtensionContext {
 	isProjectTrusted(): boolean;
 	/** The current abort signal, or undefined when the agent is not streaming. */
 	signal: AbortSignal | undefined;
+	/**
+	 * Invocation-scoped notification that steering is queued. Never a cancellation signal.
+	 * Available during tool execution; follow-up messages do not trigger it.
+	 */
+	readonly steeringSignal?: AbortSignal;
+	/**
+	 * Transient parent JS kernel-tool capability. Present only while a supported
+	 * JavaScript eval owns the host-tool context; absent on older runtimes.
+	 */
+	readonly kernelTools?: ExtensionKernelTools;
 	/** Abort the current agent operation */
 	abort(source?: "user" | "system"): void;
 	/** Whether there are queued messages waiting */
@@ -476,6 +533,8 @@ export interface ExtensionContext {
 	};
 	/** Get resolved look-at settings from global/project/user overrides. */
 	getLookAtSettings(): { enabled: boolean; models: string[] | undefined };
+	/** Get resolved ask-user settings from global/project overrides and --no-ask-user. */
+	getAskUserSettings?(): { enabled: boolean; timeoutMinutes: number };
 	/** Get resolved image settings from global/project/user overrides. */
 	getImageSettings(): { autoResize: boolean; blockImages: boolean };
 	/** Manage retry fallback through the SettingsManager owned by this session. */
@@ -527,6 +586,15 @@ export interface ProviderRequestPreparation {
 	transformHeaders(headers: ProviderHeaders): Promise<ProviderHeaders>;
 }
 
+export interface ExtensionTreeNavigationOptions {
+	summarize?: boolean;
+	customInstructions?: string;
+	replaceInstructions?: boolean;
+	label?: string;
+	/** The caller's last observed leaf, not the selected message's entry ID. */
+	expectedLeafId?: string;
+}
+
 /**
  * Extended context for command handlers.
  * Includes session control methods only safe in user-initiated commands.
@@ -550,11 +618,34 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean }>;
 
-	/** Navigate to a different point in the session tree. */
+	/** Navigate by entry ID; the positional targetId form remains supported unchanged. */
 	navigateTree(
-		targetId: string,
-		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
+		targetId: string | ({ entryId: string } & ExtensionTreeNavigationOptions),
+		options?: ExtensionTreeNavigationOptions,
 	): Promise<{ cancelled: boolean }>;
+
+	/**
+	 * Replace an assistant response with an edited copy: the leaf moves to the entry's parent and the
+	 * copy (text only; tool calls and thinking are dropped) is appended as the new leaf. Pass the leaf
+	 * you last observed as `expectedLeafId` to be refused instead of overwriting a moved session.
+	 * Rejects with the same typed errors as `AgentSession.editAssistantMessage`.
+	 */
+	editAssistantMessage(
+		entryId: string,
+		text: string,
+		options?: { summarize?: boolean; customInstructions?: string; expectedLeafId?: string },
+	): Promise<{ cancelled: boolean; unchanged?: boolean; entryId?: string }>;
+
+	/**
+	 * Replace a user prompt with an edited copy, preserving attachments and the abandoned branch.
+	 * Uses the same options as editAssistantMessage; starts no turn. Rejects with UserEditError
+	 * (not-found, not-user, empty, stale-leaf) or SessionStreamingError, unchanged from core.
+	 */
+	editUserMessage(
+		entryId: string,
+		text: string,
+		options?: { summarize?: boolean; customInstructions?: string; expectedLeafId?: string },
+	): Promise<{ cancelled: boolean; unchanged?: boolean; entryId?: string }>;
 
 	/** Switch to a different session file. */
 	switchSession(
@@ -631,7 +722,7 @@ export interface ToolRenderContext<TState = any, TArgs = any> {
 	spinnerFrame?: number;
 }
 
-export type ToolExposure = "direct" | "search";
+export type ToolExposure = "direct" | "search" | "eval";
 
 /**
  * Tool definition for registerTool().
@@ -645,6 +736,9 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	description: string;
 	/**
 	 * Initial model-exposure policy. Defaults to `"direct"`.
+	 *
+	 * `"eval"` means registered and active but withheld from the model whenever the eval tool is registered;
+	 * it remains callable as `tool.<name>()`.
 	 *
 	 * This is not a permission boundary: explicit `setActiveTools()` calls or host configuration may still activate
 	 * a search-exposed tool.
@@ -728,7 +822,8 @@ export function normalizeToolExposure(
 	searchGroup?: string;
 	allowLazyActivation: boolean;
 } {
-	const exposure: ToolExposure = definition.exposure === "search" ? "search" : "direct";
+	const exposure: ToolExposure =
+		definition.exposure === "search" || definition.exposure === "eval" ? definition.exposure : "direct";
 	return {
 		exposure,
 		searchText: exposure === "search" ? definition.searchText : undefined,
@@ -786,15 +881,29 @@ export interface ResourcesDiscoverEvent {
 	type: "resources_discover";
 	cwd: string;
 	reason: "startup" | "reload";
+	/**
+	 * Capability signal: this host accepts `{ path, scope }` entries in the result. Hosts that
+	 * predate scoped entries omit the field, so a handler that must run on both returns plain
+	 * paths when it is absent.
+	 */
+	scopedEntries: true;
 }
+
+/**
+ * A resource path contributed by `resources_discover`. A bare string inherits its scope from the
+ * contributing extension: `system` when that extension is builtin, or when it is a system package
+ * and the path lies inside the package; `temporary` otherwise. The object form pins the scope
+ * explicitly, e.g. `{ path, scope: "user" }` for user-owned data a system extension surfaces.
+ */
+export type ResourceDiscoverEntry = string | { path: string; scope?: SourceScope };
 
 /** Result from resources_discover event handler */
 export interface ResourcesDiscoverResult {
-	skillPaths?: string[];
-	promptPaths?: string[];
-	themePaths?: string[];
+	skillPaths?: ResourceDiscoverEntry[];
+	promptPaths?: ResourceDiscoverEntry[];
+	themePaths?: ResourceDiscoverEntry[];
 	/** Hook config paths discovered after initial session_start; visible to later hooks and reloads. */
-	hookPaths?: string[];
+	hookPaths?: ResourceDiscoverEntry[];
 }
 
 // ============================================================================
@@ -817,6 +926,16 @@ export interface SessionInfoChangedEvent {
 	type: "session_info_changed";
 	/** Current normalized session name. Undefined when the name is cleared. */
 	name: string | undefined;
+}
+
+/** Fired when the last client detaches from a retained in-process RPC session. */
+export interface SessionParkedEvent {
+	type: "session_parked";
+}
+
+/** Fired when the first client reattaches to an open, parked in-process RPC session. */
+export interface SessionResumedEvent {
+	type: "session_resumed";
 }
 
 /** Fired before switching to another session (can be cancelled) */
@@ -921,6 +1040,13 @@ export interface SessionShutdownEvent {
 	reason: "quit" | "reload" | "new" | "resume" | "fork";
 	/** Destination session file when shutting down due to session replacement. */
 	targetSessionFile?: string;
+	/**
+	 * Per-handler signal the host aborts when this handler exceeds
+	 * `sessionShutdownHandlerTimeoutMs`; teardown then continues without it.
+	 * Long shutdown work should observe it. Absent on hosts that predate the
+	 * shutdown handler budget.
+	 */
+	signal?: AbortSignal;
 }
 
 /** Fired when the user aborts the session outside an active agent run (retry backoff, compaction, or queued continuation), stopping in-flight work without an agent_end that carries abortSource. Extensions that track run-progress state (e.g. goal) use this to mark their state as user-interrupted. */
@@ -969,6 +1095,8 @@ export interface SessionTreeEvent {
 export type SessionEvent =
 	| SessionStartEvent
 	| SessionInfoChangedEvent
+	| SessionParkedEvent
+	| SessionResumedEvent
 	| SessionBeforeSwitchEvent
 	| SessionBeforeForkEvent
 	| SessionBeforeReloadEvent
@@ -1053,7 +1181,7 @@ export interface AgentSettledEvent {
 	type: "agent_settled";
 }
 
-export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom";
+export type UIPromptKind = "select" | "confirm" | "input" | "editor" | "custom" | "question";
 
 /** Fired when Pi starts waiting on a blocking user-facing extension UI prompt. */
 export interface UIPromptStartEvent {
@@ -1619,6 +1747,44 @@ export interface ResolvedCommand extends RegisteredCommand {
 }
 
 // ============================================================================
+// Session identity (per-session facts an extension is loaded with)
+// ============================================================================
+
+/**
+ * Engine-level visibility class of a session, chosen by whoever opened it
+ * (`open_session.kind`). `worker` sessions are machine-driven work (a task child, a
+ * team member) that clients do not list or mirror by default; every other session -
+ * classic launches, interactive opens, and any open that omits the field - is
+ * `interactive`.
+ */
+export type SessionKind = "interactive" | "worker";
+
+/**
+ * Opaque per-session labels the opener attached (`open_session.context`). The engine
+ * never interprets them: they carry no auth, no model and no resource decision, and
+ * exist so ONE host with ONE extension set can let an extension recognize the session
+ * it was loaded for.
+ */
+export type SessionContext = Readonly<Record<string, string>>;
+
+/** What a session opened without `context` sees - shared so no caller invents its own. */
+export const EMPTY_SESSION_CONTEXT: SessionContext = Object.freeze({});
+
+/** The per-session facts an extension factory may branch on at registration time. */
+export interface ExtensionSessionProfile {
+	readonly sharedHostEnabled: boolean;
+	readonly sessionKind: SessionKind;
+	readonly sessionContext: SessionContext;
+}
+
+/** The profile a classic launch (and any caller that names none) loads extensions with. */
+export const DEFAULT_EXTENSION_SESSION_PROFILE: ExtensionSessionProfile = Object.freeze({
+	sharedHostEnabled: false,
+	sessionKind: "interactive",
+	sessionContext: EMPTY_SESSION_CONTEXT,
+});
+
+// ============================================================================
 // Extension API
 // ============================================================================
 
@@ -1636,6 +1802,20 @@ export interface ExtensionAPI {
 
 	/** Absolute cwd of the session this extension instance was loaded for. */
 	readonly cwd: string;
+	/** Effective shared-host capability for registration-time extension decisions. */
+	readonly sharedHostEnabled: boolean;
+	/**
+	 * Visibility class of the session this extension instance was loaded for
+	 * (`open_session.kind`). `interactive` for classic launches and every open that
+	 * omits the field.
+	 */
+	readonly sessionKind: SessionKind;
+	/**
+	 * Opaque labels the opener attached to this session (`open_session.context`), or
+	 * `{}` when it attached none. One extension set can therefore serve every session
+	 * of a shared host and still gate itself per session.
+	 */
+	readonly sessionContext: SessionContext;
 
 	// =========================================================================
 	// Event Subscription
@@ -1645,6 +1825,8 @@ export interface ExtensionAPI {
 	on(event: "resources_discover", handler: ExtensionHandler<ResourcesDiscoverEvent, ResourcesDiscoverResult>): void;
 	on(event: "session_start", handler: ExtensionHandler<SessionStartEvent>): void;
 	on(event: "session_info_changed", handler: ExtensionHandler<SessionInfoChangedEvent>): void;
+	on(event: "session_parked", handler: ExtensionHandler<SessionParkedEvent>): void;
+	on(event: "session_resumed", handler: ExtensionHandler<SessionResumedEvent>): void;
 	on(
 		event: "session_before_switch",
 		handler: ExtensionHandler<SessionBeforeSwitchEvent, SessionBeforeSwitchResult>,
@@ -1772,6 +1954,9 @@ export interface ExtensionAPI {
 
 	/** Register a custom renderer for CustomEntry. Custom entries do not participate in LLM context. */
 	registerEntryRenderer<T = unknown>(customType: string, renderer: EntryRenderer<T>): void;
+
+	/** Register a compact read classifier; removed on unregister, failed load, or runtime invalidation. */
+	registerReadClassifier(classifier: ReadClassifier): () => void;
 
 	// =========================================================================
 	// Actions
@@ -2276,6 +2461,8 @@ export interface ExtensionActions {
 export interface ExtensionContextActions {
 	getModel: () => Model<any> | undefined;
 	getServiceTier: () => ServiceTier | undefined;
+	/** Effective request tier (fast mode included). Defaults to `getServiceTier` when omitted. */
+	getEffectiveServiceTier?: () => ServiceTier | undefined;
 	getScopedModels: () => readonly ScopedModel[];
 	getAgentDir?: () => string;
 	isIdle: () => boolean;
@@ -2297,6 +2484,7 @@ export interface ExtensionContextActions {
 		marginSeconds: number;
 	};
 	getLookAtSettings: () => { enabled: boolean; models: string[] | undefined };
+	getAskUserSettings?: () => { enabled: boolean; timeoutMinutes: number };
 	getImageSettings: () => { autoResize: boolean; blockImages: boolean };
 	sessionSettings: ExtensionSessionSettings;
 	compact: (options?: CompactOptions) => void;
@@ -2325,7 +2513,7 @@ export interface LoadedHookSources {
 
 /**
  * Actions for ExtensionCommandContext (ctx.* in command handlers).
- * Only needed for interactive mode where extension commands are invokable.
+ * Bound by interactive, print, and RPC modes where extension commands are invokable.
  */
 export interface ExtensionCommandContextActions {
 	waitForIdle: () => Promise<void>;
@@ -2338,10 +2526,13 @@ export interface ExtensionCommandContextActions {
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	) => Promise<{ cancelled: boolean }>;
-	navigateTree: (
-		targetId: string,
-		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
-	) => Promise<{ cancelled: boolean }>;
+	navigateTree: (targetId: string, options?: ExtensionTreeNavigationOptions) => Promise<{ cancelled: boolean }>;
+	editAssistantMessage: (
+		entryId: string,
+		text: string,
+		options?: { summarize?: boolean; customInstructions?: string; expectedLeafId?: string },
+	) => Promise<{ cancelled: boolean; unchanged?: boolean; entryId?: string }>;
+	editUserMessage: ExtensionCommandContext["editUserMessage"];
 	switchSession: (
 		sessionPath: string,
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },

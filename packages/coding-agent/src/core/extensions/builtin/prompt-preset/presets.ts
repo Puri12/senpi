@@ -7,6 +7,7 @@ import { buildClaudeOpus46Prompt } from "./claude-opus-4-6.ts";
 import { buildClaudeOpus47Prompt } from "./claude-opus-4-7.ts";
 import { buildClaudeOpus48Prompt } from "./claude-opus-4-8.ts";
 import { buildClaudeOpus5Prompt } from "./claude-opus-5.ts";
+import { buildDeepseekV41FlashPrompt } from "./deepseek-v4-1-flash.ts";
 import { buildDeepseekV4FlashPrompt } from "./deepseek-v4-flash.ts";
 import { buildDeepseekV4Flash0731Prompt } from "./deepseek-v4-flash-0731.ts";
 import { buildDeepseekV4ProPrompt } from "./deepseek-v4-pro.ts";
@@ -23,6 +24,7 @@ import { buildGrok45Prompt } from "./grok-4.5.ts";
 import { buildGrok46Prompt } from "./grok-4.6.ts";
 import { buildKimiK26Prompt } from "./kimi-k2-6.ts";
 import { buildKimiK27Prompt } from "./kimi-k2-7.ts";
+import { buildKimiK28Prompt } from "./kimi-k2-8.ts";
 import { buildKimiK3Prompt } from "./kimi-k3.ts";
 import { type PromptPresetName, type PromptPresetSettings, parsePromptPreset } from "./settings.ts";
 
@@ -86,12 +88,29 @@ function isKimiK26Model(model: ModelWithPromptPresetMetadata): boolean {
 	return hasKimiK26Signal(model.id) || (model.name !== undefined && hasKimiK26Signal(model.name));
 }
 
+// Kimi Code addresses its models by rolling product ids rather than version tags:
+// Moonshot upgraded `kimi-for-coding` to K2.8 Preview in place on 2026-09-11 and
+// left `kimi-for-coding-highspeed` on K2.7 Code HighSpeed.
+// https://www.kimi.com/code/docs/en/kimi-code/models.html (checked 2026-09-18)
+const KIMI_CODE_K27_MODEL_ID = "kimi-for-coding-highspeed";
+const KIMI_CODE_K28_MODEL_ID = "kimi-for-coding";
+
 function hasKimiK27Signal(value: string): boolean {
-	return /(?:^|[/@._-])kimi-k2(?:[._-]|p)7(?:$|[/@._:-])/.test(normalizeModelId(value));
+	const normalized = normalizeModelId(value);
+	return normalized === KIMI_CODE_K27_MODEL_ID || /(?:^|[/@._-])kimi-k2(?:[._-]|p)7(?:$|[/@._:-])/.test(normalized);
 }
 
 function isKimiK27Model(model: ModelWithPromptPresetMetadata): boolean {
 	return hasKimiK27Signal(model.id) || (model.name !== undefined && hasKimiK27Signal(model.name));
+}
+
+function hasKimiK28Signal(value: string): boolean {
+	const normalized = normalizeModelId(value);
+	return normalized === KIMI_CODE_K28_MODEL_ID || /(?:^|[/@._-])kimi-k2(?:[._-]|p)8(?:$|[/@._:-])/.test(normalized);
+}
+
+function isKimiK28Model(model: ModelWithPromptPresetMetadata): boolean {
+	return hasKimiK28Signal(model.id) || (model.name !== undefined && hasKimiK28Signal(model.name));
 }
 
 function hasKimiK3Signal(value: string): boolean {
@@ -101,6 +120,14 @@ function hasKimiK3Signal(value: string): boolean {
 
 function isKimiK3Model(model: ModelWithPromptPresetMetadata): boolean {
 	return hasKimiK3Signal(model.id) || (model.name !== undefined && hasKimiK3Signal(model.name));
+}
+
+function hasSWE2Signal(value: string): boolean {
+	return /(?:^|[/@:._-])swe-2-(?:high|max|low|high-lite)(?:$|[/@:._-])/.test(normalizeModelId(value));
+}
+
+function isSWE2Model(model: ModelWithPromptPresetMetadata): boolean {
+	return hasSWE2Signal(model.id) || (model.name !== undefined && hasSWE2Signal(model.name));
 }
 
 // DeepSeek V4 id shapes verified against the OpenRouter live API, models.dev,
@@ -124,6 +151,37 @@ function hasDeepseekV4FlashSignal(value: string): boolean {
 
 function isDeepseekV4FlashModel(model: ModelWithPromptPresetMetadata): boolean {
 	return hasDeepseekV4FlashSignal(model.id) || (model.name !== undefined && hasDeepseekV4FlashSignal(model.name));
+}
+
+// DeepSeek V4.1 Flash id shapes verified against models.dev and the provider
+// catalogs (2026-09-11): deepseek-flash (the official API name, also opencode-go),
+// deepseek-v4.1-flash and deepseek/deepseek-v4.1-flash[:thinking] (OpenRouter,
+// Vercel, requesty, kilo, ...), deepseek-ai/DeepSeek-V4.1-Flash (Hugging Face,
+// DeepInfra), accounts/fireworks/models/deepseek-v4p1-flash, venice's
+// deepseek-v4-1-flash, and the display name "DeepSeek V4.1 Flash".
+function hasDeepseekV41FlashSignal(value: string): boolean {
+	const normalized = normalizeModelId(value);
+	return (
+		/(?:^|[/@:._-])deepseek[._-]v4(?:[._-]1|p1)[._-]flash(?:$|[/@:._-])/.test(normalized) ||
+		/(?:^|[/@:._-])deepseek[._-]flash(?:$|[/@:._-])/.test(normalized)
+	);
+}
+
+const DEEPSEEK_OFFICIAL_PROVIDER = "deepseek";
+
+// DeepSeek retired V4 Flash on 2026-09-10: on the official API, deepseek-v4-flash
+// and deepseek-v4-flash-vision-exp are served by V4.1 Flash. Every other
+// provider still hosts the V4 weights under those names.
+function isRetiredOfficialDeepseekV4FlashAlias(model: ModelWithPromptPresetMetadata): boolean {
+	return model.provider === DEEPSEEK_OFFICIAL_PROVIDER && hasDeepseekV4FlashSignal(model.id);
+}
+
+function isDeepseekV41FlashModel(model: ModelWithPromptPresetMetadata): boolean {
+	return (
+		hasDeepseekV41FlashSignal(model.id) ||
+		(model.name !== undefined && hasDeepseekV41FlashSignal(model.name)) ||
+		isRetiredOfficialDeepseekV4FlashAlias(model)
+	);
 }
 
 function hasDeepseekV4ProSignal(value: string): boolean {
@@ -228,8 +286,11 @@ export function resolvePresetName(
 	if (gpt5Version) {
 		return gpt5Version;
 	}
-	if (isKimiK3Model(model)) {
+	if (isSWE2Model(model) || isKimiK3Model(model)) {
 		return "kimi-k3";
+	}
+	if (isKimiK28Model(model)) {
+		return "kimi-k2-8";
 	}
 	if (isKimiK27Model(model)) {
 		return "kimi-k2-7";
@@ -260,6 +321,9 @@ export function resolvePresetName(
 	// The dated snapshot must resolve before the generic flash alias.
 	if (isDeepseekV4Flash0731Model(model)) {
 		return "deepseek-v4-flash-0731";
+	}
+	if (isDeepseekV41FlashModel(model)) {
+		return "deepseek-v4-1-flash";
 	}
 	if (isDeepseekV4FlashModel(model)) {
 		return "deepseek-v4-flash";
@@ -300,6 +364,8 @@ function buildPreset(name: ResolvedPresetName, options: BuildDynamicSystemPrompt
 			return { name, prompt: buildDeepseekV4FlashPrompt(options) };
 		case "deepseek-v4-flash-0731":
 			return { name, prompt: buildDeepseekV4Flash0731Prompt(options) };
+		case "deepseek-v4-1-flash":
+			return { name, prompt: buildDeepseekV41FlashPrompt(options) };
 		case "deepseek-v4-pro":
 			return { name, prompt: buildDeepseekV4ProPrompt(options) };
 		case "grok-4.6":
@@ -308,6 +374,8 @@ function buildPreset(name: ResolvedPresetName, options: BuildDynamicSystemPrompt
 			return { name, prompt: buildGrok45Prompt(options) };
 		case "kimi-k3":
 			return { name, prompt: buildKimiK3Prompt(options) };
+		case "kimi-k2-8":
+			return { name, prompt: buildKimiK28Prompt(options) };
 		case "kimi-k2-7":
 			return { name, prompt: buildKimiK27Prompt(options) };
 		case "kimi-k2-6":

@@ -1,14 +1,19 @@
 import { join, resolve } from "node:path";
-import { Container, Text, type TUI } from "@earendil-works/pi-tui";
+import { Container, Text, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import { getReadmePath } from "../src/config.ts";
+import { createEventBus } from "../src/core/event-bus.ts";
 import { registerTodoTool, type TODO_PARAMS_SCHEMA } from "../src/core/extensions/builtin/todotools/tools/todo.ts";
+import { createExtensionRuntime, loadExtensionFromFactory } from "../src/core/extensions/loader.ts";
 import type { ExtensionAPI, ToolDefinition } from "../src/core/extensions/types.ts";
 import { type BashOperations, createBashToolDefinition } from "../src/core/tools/bash.ts";
 import { renderToolDiff } from "../src/core/tools/diff-render.ts";
 import { createReadTool, createReadToolDefinition } from "../src/core/tools/read.ts";
+import type { ReadClassifier } from "../src/core/tools/read-classifiers.ts";
+import { withBuiltInRenderers } from "../src/core/tools/renderers/index.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
+import { keyText } from "../src/modes/interactive/components/keybinding-hints.ts";
 import {
 	TODO_STRIKE_FRAME_INTERVAL_MS,
 	TODO_STRIKE_TOTAL_FRAMES,
@@ -29,6 +34,21 @@ function createBaseToolDefinition(name = "custom_tool"): ToolDefinition {
 			details: {},
 		}),
 	};
+}
+
+async function registerReadClassifierThroughExtension(classifier: ReadClassifier): Promise<() => void> {
+	let api: ExtensionAPI | undefined;
+	await loadExtensionFromFactory(
+		(pi) => {
+			api = pi;
+		},
+		process.cwd(),
+		createEventBus(),
+		createExtensionRuntime(),
+	);
+	if (!api) throw new Error("Expected extension API");
+	expect(api.registerReadClassifier).toBeTypeOf("function");
+	return api.registerReadClassifier(classifier);
 }
 
 function createFakeTui(): TUI {
@@ -233,7 +253,7 @@ describe("ToolExecutionComponent parity", () => {
 			"tool-2",
 			{ path: "README.md", oldText: "before", newText: "after" },
 			{},
-			overrideDefinition,
+			withBuiltInRenderers("edit", overrideDefinition),
 			createFakeTui(),
 			process.cwd(),
 		);
@@ -262,10 +282,7 @@ describe("ToolExecutionComponent parity", () => {
 	test("bash execute emits an initial empty partial update before output arrives", async () => {
 		const updates: Array<{ content: Array<{ type: string; text?: string }>; details?: unknown }> = [];
 		const operations: BashOperations = {
-			exec: async () => {
-				await new Promise((resolve) => setTimeout(resolve, 10));
-				return { exitCode: 0 };
-			},
+			exec: async () => ({ exitCode: 0 }),
 		};
 		const tool = createBashToolDefinition(process.cwd(), { operations, exposeSessionEnvironment: false });
 		const promise = tool.execute(
@@ -395,7 +412,7 @@ describe("ToolExecutionComponent parity", () => {
 			"tool-4b",
 			{ path: "notes.txt" },
 			{},
-			overrideDefinition,
+			withBuiltInRenderers("read", overrideDefinition),
 			createFakeTui(),
 			process.cwd(),
 		);
@@ -417,7 +434,7 @@ describe("ToolExecutionComponent parity", () => {
 			"tool-4c",
 			{ path: "README.md" },
 			{},
-			overrideDefinition,
+			withBuiltInRenderers("read", overrideDefinition),
 			createFakeTui(),
 			process.cwd(),
 		);
@@ -666,6 +683,42 @@ describe("ToolExecutionComponent parity", () => {
 		expect(rendered).toContain(theme.fg("toolOutput", error));
 	});
 
+	test("expands a collapsed tool result when clicked", () => {
+		const component = new ToolExecutionComponent(
+			"read",
+			"tool-click-expand",
+			{ path: "notes.txt" },
+			{},
+			createReadToolDefinition(process.cwd()),
+			createFakeTui(),
+			process.cwd(),
+		);
+		component.updateResult(
+			{ content: [{ type: "text", text: "hidden content" }], details: undefined, isError: false },
+			false,
+		);
+		const width = 120;
+		const lines = component.render(width);
+		const resultRow = lines.findIndex((line) => stripAnsi(line).includes("notes.txt"));
+		expect(resultRow).toBeGreaterThanOrEqual(0);
+		const event: TuiMouseEvent = {
+			type: "click",
+			button: "left",
+			x: 2,
+			y: resultRow,
+			screenX: 2,
+			screenY: resultRow,
+			width,
+			height: lines.length,
+			shift: false,
+			alt: false,
+			ctrl: false,
+			clickCount: 1,
+		};
+		expect(component.handleMouse(event)?.handled).toBe(true);
+		expect(stripAnsi(component.render(width).join("\n"))).toContain("hidden content");
+	});
+
 	test("collapses ordinary read results until expanded", () => {
 		const component = new ToolExecutionComponent(
 			"read",
@@ -781,6 +834,132 @@ describe("ToolExecutionComponent parity", () => {
 			expect(collapsed.indexOf(":120-329")).toBeLessThan(collapsed.indexOf("to expand"));
 		});
 	}
+
+	for (const headline of ["Remembered", undefined]) {
+		test(`renders classified memory reads with ${headline ?? "the default headline"}`, async () => {
+			const args = { path: "memory/preference.md", offset: 2, limit: 3 };
+			const classifier = vi.fn(() => ({ kind: "memory" as const, label: "preference", headline }));
+			const unregister = await registerReadClassifierThroughExtension(classifier);
+			try {
+				const component = new ToolExecutionComponent(
+					"read",
+					"tool-memory-read",
+					args,
+					{},
+					createReadToolDefinition(process.cwd()),
+					createFakeTui(),
+					process.cwd(),
+				);
+				component.updateResult(
+					{ content: [{ type: "text", text: "hidden memory" }], details: undefined, isError: false },
+					false,
+				);
+				const collapsed = component.render(120).join("\n");
+				expect(stripAnsi(collapsed)).toContain(
+					`✦ ${headline ?? "Recalled"} preference:2-4 (${keyText("app.tools.expand")} to expand)`,
+				);
+				expect(collapsed).toContain(theme.fg("accent", `\x1b[1m✦ ${headline ?? "Recalled"}\x1b[22m`));
+				expect(collapsed).toContain(theme.fg("customMessageText", "preference"));
+				expect(stripAnsi(collapsed)).not.toContain("hidden memory");
+				expect(classifier).toHaveBeenCalledExactlyOnceWith({
+					absolutePath: resolve(process.cwd(), args.path),
+					cwd: process.cwd(),
+				});
+
+				component.setExpanded(true);
+				const expanded = stripAnsi(component.render(120).join("\n"));
+				expect(expanded).toContain("memory/preference.md:2-4");
+				expect(expanded).toContain("hidden memory");
+				expect(expanded).not.toContain("✦");
+				component.setExpanded(false);
+				expect(component.render(120).join("\n")).toBe(collapsed);
+				expect(classifier).toHaveBeenCalledTimes(1);
+			} finally {
+				unregister();
+			}
+		});
+	}
+
+	test("keeps SKILL.md ahead of registered read classifiers", async () => {
+		const classifier = vi.fn(() => ({ kind: "memory" as const, label: "not a skill" }));
+		const unregister = await registerReadClassifierThroughExtension(classifier);
+		try {
+			const component = new ToolExecutionComponent(
+				"read",
+				"tool-memory-skill-precedence",
+				{ path: join(process.cwd(), "attio", "SKILL.md") },
+				{},
+				createReadToolDefinition(process.cwd()),
+				createFakeTui(),
+				process.cwd(),
+			);
+			expect(stripAnsi(component.render(120).join("\n"))).toContain("[skill] attio");
+			expect(classifier).not.toHaveBeenCalled();
+		} finally {
+			unregister();
+		}
+	});
+
+	for (const path of [getReadmePath(), join(process.cwd(), "AGENTS.md")]) {
+		test(`registered read classifiers take precedence over built-in classification for ${path}`, async () => {
+			const unregister = await registerReadClassifierThroughExtension(() => ({ kind: "memory", label: "claimed" }));
+			try {
+				const component = new ToolExecutionComponent(
+					"read",
+					"tool-memory-builtin-precedence",
+					{ path },
+					{},
+					createReadToolDefinition(process.cwd()),
+					createFakeTui(),
+					process.cwd(),
+				);
+				expect(stripAnsi(component.render(120).join("\n"))).toContain("✦ Recalled claimed");
+			} finally {
+				unregister();
+			}
+		});
+	}
+
+	test("memoizes read classification by raw path in shared renderCall state", async () => {
+		let calls = 0;
+		const classifier = vi.fn(() => ({ kind: "memory" as const, label: "preference", headline: `Recall ${++calls}` }));
+		const unregister = await registerReadClassifierThroughExtension(classifier);
+		try {
+			const args = { path: "memory/preference.md" };
+			const tool = createReadToolDefinition(process.cwd());
+			const context: Parameters<NonNullable<typeof tool.renderCall>>[2] = {
+				args,
+				toolCallId: "tool-stable-memory",
+				invalidate: () => {},
+				lastComponent: undefined,
+				state: {},
+				cwd: process.cwd(),
+				executionStarted: false,
+				argsComplete: true,
+				isPartial: false,
+				expanded: false,
+				showImages: false,
+				isError: false,
+			};
+			const first = tool.renderCall!(args, theme, context).render(120).join("\n");
+			const second = tool.renderCall!(args, theme, { ...context })
+				.render(120)
+				.join("\n");
+			expect(second).toBe(first);
+			expect(stripAnsi(first)).toContain("✦ Recall 1 preference");
+			expect(classifier).toHaveBeenCalledTimes(1);
+
+			const otherArgs = { path: "memory/other.md" };
+			const other = tool.renderCall!(otherArgs, theme, { ...context, args: otherArgs })
+				.render(120)
+				.join("\n");
+			expect(stripAnsi(other)).toContain("✦ Recall 2 preference");
+			expect(tool.renderCall!(args, theme, context).render(120).join("\n")).toBe(first);
+			expect(classifier).toHaveBeenCalledTimes(2);
+		} finally {
+			unregister();
+		}
+	});
 
 	test("animates completed todo tasks through the strike reveal and settles", () => {
 		vi.useFakeTimers();

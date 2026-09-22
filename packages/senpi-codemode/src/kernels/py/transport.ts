@@ -8,7 +8,8 @@ import {
 	isKernelToHostMessage,
 	type KernelToHostMessage,
 } from "../../bridge/protocol.ts";
-import { type CodemodeRuntimeAssetEnvironment, resolveCodemodeRuntimeAsset } from "../shared/runtime-asset.ts";
+import { applySessionEnvironment, type SessionEnvironment } from "../session-env.ts";
+import { type CodemodeRuntimeAssetEnvironment, requireCodemodeRuntimeAsset } from "../shared/runtime-asset.ts";
 import {
 	defaultSpawn,
 	hardKill,
@@ -18,6 +19,7 @@ import {
 	numberOrNull,
 	signalOrNull,
 	splitCommand,
+	sweepProcessGroup,
 	waitForExit,
 	withTimeout,
 } from "./process.ts";
@@ -36,6 +38,8 @@ export interface PythonTransportOptions {
 	readonly cwd: string;
 	readonly connection: BridgeConnectionConfig;
 	readonly env?: NodeJS.ProcessEnv;
+	/** Per-session PI_* values merged into the interpreter environment at spawn. */
+	readonly sessionEnv?: SessionEnvironment;
 	readonly startupTimeoutMs: number;
 	readonly onMessage?: (message: KernelToHostMessage) => void;
 	readonly spawnProcess?: KernelSpawnProcess;
@@ -53,7 +57,7 @@ export interface PythonPreludePathOptions extends CodemodeRuntimeAssetEnvironmen
 }
 
 export function resolvePythonPreludePath(options: PythonPreludePathOptions = {}): string {
-	return resolveCodemodeRuntimeAsset(
+	return requireCodemodeRuntimeAsset(
 		options.localPath ?? join(dirname(fileURLToPath(import.meta.url)), "prelude.py"),
 		join("kernels", "py", "prelude.py"),
 		options,
@@ -83,7 +87,12 @@ export class PythonKernelTransport {
 			command: invocation.command,
 			args: [...invocation.args, "-u", scriptPath],
 			cwd: options.cwd,
-			env: { ...process.env, ...options.env, PYTHONUNBUFFERED: "1", PYTHONIOENCODING: "utf-8" },
+			env: {
+				...applySessionEnvironment(process.env, options.sessionEnv),
+				...options.env,
+				PYTHONUNBUFFERED: "1",
+				PYTHONIOENCODING: "utf-8",
+			},
 		};
 		const child = (options.spawnProcess ?? defaultSpawn)(spawnOptions);
 		const transport = new PythonKernelTransport(options, child);
@@ -137,7 +146,10 @@ export class PythonKernelTransport {
 		} catch (error) {
 			if (!(error instanceof Error)) throw error;
 		}
-		if (!(await exited)) await hardKill(this.#child, hardKillWaitMs);
+		// hardKill kills the whole group; a graceful leader exit does not, so sweep it
+		// to retire any subprocess the cell left running in the kernel's process group.
+		if (await exited) sweepProcessGroup(this.#child);
+		else await hardKill(this.#child, hardKillWaitMs);
 	}
 
 	retire(): Promise<void> {

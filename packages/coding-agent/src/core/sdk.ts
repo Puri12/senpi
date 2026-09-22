@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ThinkingSelection } from "@earendil-works/pi-ai";
-import { type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
+import { type Api, type Message, type Model, modelsAreEqual, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
@@ -10,7 +10,9 @@ import { AuthStorage } from "./auth-storage.ts";
 import { estimateTokens } from "./compaction/compaction.ts";
 import { createSessionCursorExecBridge } from "./cursor-exec-bridge-session.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
-import type { ServiceTier } from "./extensions/builtin/service-tier.ts";
+import { ModelUsabilityBudgetError } from "./extensions/builtin/compaction/model-usability-budget.ts";
+import { planResumeSlice } from "./extensions/builtin/compaction/resume-slice.ts";
+import { type ServiceTier, supportsServiceTier } from "./extensions/builtin/service-tier.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlmForTransport, TRANSPORT_IMAGE_BUDGET_BYTES } from "./messages.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -89,7 +91,7 @@ export interface CreateAgentSessionOptions {
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
 	 *
 	 * - "all": start with no tools enabled
-	 * - "builtin": disable the default built-in tools (read, bash, edit, write)
+	 * - "builtin": disable the default built-in tools (read, bash, edit, write, grep)
 	 *   but keep extension/custom tools enabled
 	 */
 	noTools?: "all" | "builtin";
@@ -98,7 +100,8 @@ export interface CreateAgentSessionOptions {
 	 *
 	 * When omitted, pi uses the `defaultTools` setting for the initial built-in
 	 * selection when configured. Otherwise it enables the default built-in tools
-	 * (read, bash, edit, write). Extension/custom tools remain enabled unless
+	 * (read, bash, edit, write, grep). Eval-exposed tools are withheld from direct
+	 * model calls when eval is registered. Extension/custom tools remain enabled unless
 	 * `noTools` changes that default. When provided, only the listed tool names are
 	 * enabled.
 	 */
@@ -241,6 +244,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRegistry = options.modelRegistry ?? new ModelRegistry(modelRuntime, authStorage);
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
+	modelRuntime.setSettingsManager(settingsManager);
 	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 	const scopedModels =
 		options.scopedModels ??
@@ -361,7 +365,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 	if (thinkingSelection) thinkingSelection = { ...thinkingSelection, level: thinkingLevel };
 
-	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write"];
+	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write", "grep"];
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
 	const sessionDefaultToolNames =
 		options.tools === undefined && options.noTools === undefined ? configuredDefaultToolNames : undefined;
@@ -388,9 +392,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
-	// The session (and its tool registry) is constructed after the Agent, so
-	// the Cursor exec bridge resolves tools through this late-bound ref.
-	const cursorBridgeSessionRef: { current?: AgentSession } = {};
+	// The session (and its tool registry) is constructed after the Agent, so the Cursor exec
+	// bridge and the request-tier resolver below reach it through this late-bound ref.
+	const sessionRef: { current?: AgentSession } = {};
+
+	// The `service_tier` a request carries when the caller did not pin one. The session's
+	// effective tier is the single source: a `-fast` catalog variant, a scoped `:priority` pin, or
+	// session fast mode all land here, so an SDK/embedded session honors the tier without the
+	// interactive service-tier extension being loaded (its payload hook only fills a missing
+	// field and stays consistent). A request for another model (title/branch summaries) falls
+	// back to that model's own catalog tier. Only the OpenAI Responses family accepts the field.
+	const resolveRequestServiceTier = (requestModel: Model<Api>): ServiceTier | undefined => {
+		if (!supportsServiceTier(requestModel.api)) return undefined;
+		const session = sessionRef.current;
+		const activeModel = session?.model;
+		if (session && activeModel && modelsAreEqual(activeModel, requestModel)) {
+			return session.effectiveServiceTier;
+		}
+		return modelRuntime.getCompatibilityRequestConfig(requestModel).serviceTier;
+	};
 
 	agent = new Agent({
 		initialState: {
@@ -423,8 +443,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					: declaredPolicy.providerRequest.enabled
 						? declaredPolicy.providerRequest.maxRetries
 						: 0;
+			const serviceTier = options?.serviceTier ?? resolveRequestServiceTier(model);
 			return modelRuntime.streamSimple(model, context, {
 				...options,
+				...(serviceTier !== undefined ? { serviceTier } : {}),
 				timeoutMs,
 				websocketConnectTimeoutMs,
 				maxRetries: options?.maxRetries ?? profileMaxRetries,
@@ -473,8 +495,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		timeoutMs: settingsManager.getAgentStreamIdleTimeoutMs(),
 		streamStartTimeoutMs: settingsManager.getAgentStreamStartTimeoutMs(),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
-		cursorExecHandlers: (runSignal: AbortSignal) =>
-			createSessionCursorExecBridge(cursorBridgeSessionRef, () => agent, runSignal),
+		cursorExecHandlers: (runSignal: AbortSignal) => createSessionCursorExecBridge(sessionRef, () => agent, runSignal),
 	});
 	// Agent core accepts the field in AgentState but older constructors may not copy it
 	// from initialState; assign the separately computed provenance explicitly.
@@ -524,12 +545,32 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const liveContextTokens = hasExistingSession
 		? existingSession.messages.reduce((total, message) => total + estimateTokens(message), 0)
 		: 0;
-	session.assertModelUsable(
-		undefined,
-		liveContextTokens,
-		hasExistingSession ? { includeSpeculationLead: false, admission: "resume" } : { admission: "start" },
-	);
-	cursorBridgeSessionRef.current = session;
+	try {
+		session.assertModelUsable(
+			undefined,
+			liveContextTokens,
+			hasExistingSession ? { includeSpeculationLead: false, admission: "resume" } : { admission: "start" },
+		);
+	} catch (error) {
+		if (
+			!hasExistingSession ||
+			!(error instanceof ModelUsabilityBudgetError) ||
+			!session.settingsManager.getCompactionEnabled()
+		) {
+			throw error;
+		}
+		if (error.projection.liveContextTokens > error.projection.contextWindow) {
+			const plan = planResumeSlice({
+				entries: session.sessionManager.getBranch(),
+				projection: error.projection,
+			});
+			if (!plan) throw error;
+			session.applyResumeSlice(plan);
+		} else {
+			session.admitResumeCompactionRequired(error.projection);
+		}
+	}
+	sessionRef.current = session;
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

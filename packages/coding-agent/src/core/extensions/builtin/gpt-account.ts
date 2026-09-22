@@ -1,32 +1,32 @@
+import type { AccountLoginReceipt } from "@earendil-works/pi-ai";
+import { accountLabel } from "@earendil-works/pi-ai/auth/pool/slots";
 import {
 	getCredentialAccounts,
 	pinCredentialAccount,
 	removeCredentialAccount,
 } from "../../../core/credential-accounts.ts";
 import type { ExtensionAPI, ExtensionCommandContext } from "../types.ts";
+import { accountDisplayNameCommand, promptAccountDisplayName } from "./account-display-name.ts";
 import { emitProviderAccountsChanged } from "./claude-sdk-oauth/account-events.ts";
+import { createExtensionLoginInteraction, LOGIN_CANCELLED_MESSAGE } from "./oauth-login-interaction.ts";
 
 const OPENAI_CODEX_PROVIDER_ID = "openai-codex";
-const LOGIN_CANCELLED_MESSAGE = "Login cancelled";
+const OPENAI_CODEX_PROVIDER_LABEL = "OpenAI Codex OAuth";
+
+export interface GptAccountExtensionDeps {
+	/** Browser launcher for the browser login method; tests inject a recorder. */
+	readonly openBrowser?: ((url: string) => void) | undefined;
+}
 
 function parseArgs(rawArgs: string): string[] {
 	return rawArgs.trim().split(/\s+/).filter(Boolean);
 }
 
 function usage(ctx: ExtensionCommandContext): void {
-	ctx.ui.notify("Usage: /gpt-account [add | remove <name> | pin <name> | unpin]", "error");
-}
-
-function authEventMessage(event: unknown): string {
-	if (event === null || typeof event !== "object") return "OpenAI Codex OAuth authentication update.";
-	const value = event as Record<string, unknown>;
-	if (value.type === "auth_url" && typeof value.url === "string") {
-		return `Open this URL to authorize OpenAI Codex OAuth:\n${value.url}`;
-	}
-	if (value.type === "device_code" && typeof value.verificationUri === "string") {
-		return `Open this URL to authorize OpenAI Codex OAuth:\n${value.verificationUri}`;
-	}
-	return typeof value.message === "string" ? value.message : "OpenAI Codex OAuth authentication update.";
+	ctx.ui.notify(
+		"Usage: /gpt-account [add | remove <id> | pin <id> | unpin | rename <id> <display name...> | clear-name <id>]",
+		"error",
+	);
 }
 
 async function showAccounts(ctx: ExtensionCommandContext): Promise<void> {
@@ -34,30 +34,33 @@ async function showAccounts(ctx: ExtensionCommandContext): Promise<void> {
 	const lines = ["OpenAI Codex OAuth accounts:"];
 	if (accounts.length === 0) lines.push("  (none)");
 	for (const account of accounts) {
-		const states = [account.name, account.source, account.blocked ? "blocked" : "available"];
+		const states = [accountLabel(account), account.source, account.blocked ? "blocked" : "available"];
 		if (account.pinned) states.push("pinned");
 		lines.push(`  ${states.join(" | ")}`);
 	}
 	ctx.ui.notify(lines.join("\n"), "info");
 }
 
-async function addAccount(ctx: ExtensionCommandContext): Promise<void> {
+async function addAccount(ctx: ExtensionCommandContext, deps: GptAccountExtensionDeps): Promise<void> {
 	if (!ctx.hasUI) {
 		ctx.ui.notify("/gpt-account add requires an interactive UI.", "error");
 		return;
 	}
 	try {
+		let receipt: AccountLoginReceipt | undefined;
 		await ctx.modelRegistry.modelRuntime.login(OPENAI_CODEX_PROVIDER_ID, "oauth", {
-			signal: ctx.signal,
-			prompt: async (prompt) => {
-				const answer = await ctx.ui.input(prompt.message);
-				if (answer === undefined) throw new Error(LOGIN_CANCELLED_MESSAGE);
-				return answer;
+			...createExtensionLoginInteraction(ctx, {
+				providerLabel: OPENAI_CODEX_PROVIDER_LABEL,
+				providerId: OPENAI_CODEX_PROVIDER_ID,
+				openBrowser: deps.openBrowser,
+			}),
+			onAccountCommitted: (committed) => {
+				receipt = committed;
 			},
-			notify: (event) => ctx.ui.notify(authEventMessage(event), "info"),
 		});
 		emitProviderAccountsChanged(OPENAI_CODEX_PROVIDER_ID);
 		ctx.ui.notify("OpenAI Codex OAuth account added.", "info");
+		await promptAccountDisplayName(ctx, receipt);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
 		if (message === LOGIN_CANCELLED_MESSAGE) return;
@@ -83,11 +86,12 @@ async function pinAccount(ctx: ExtensionCommandContext, name: string | undefined
 	ctx.ui.notify(`Pinned OpenAI Codex OAuth account '${name}'.`, "info");
 }
 
-export default function gptAccountExtension(pi: ExtensionAPI): void {
+export default function gptAccountExtension(pi: ExtensionAPI, deps: GptAccountExtensionDeps = {}): void {
 	pi.registerCommand("gpt-account", {
 		description: "List and manage OpenAI Codex OAuth accounts.",
-		argumentHint: "[add | remove <name> | pin <name> | unpin]",
+		argumentHint: "[add | remove <id> | pin <id> | unpin | rename <id> <display name...> | clear-name <id>]",
 		handler: async (rawArgs, ctx) => {
+			if (await accountDisplayNameCommand(ctx, OPENAI_CODEX_PROVIDER_ID, rawArgs)) return;
 			const args = parseArgs(rawArgs);
 			const action = args[0] ?? "list";
 			try {
@@ -96,7 +100,7 @@ export default function gptAccountExtension(pi: ExtensionAPI): void {
 					return;
 				}
 				if (action === "add") {
-					await addAccount(ctx);
+					await addAccount(ctx, deps);
 					return;
 				}
 				if (action === "remove") {

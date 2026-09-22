@@ -12,6 +12,500 @@
 
 ### Removed
 
+## [2026.9.22] - 2026-09-21
+
+### Breaking Changes
+
+### Added
+
+- Kimi Code login asks which service hosts the account, **Mainland China (kimi.com)** or **Outside mainland China (kimi.ai)**, for both the subscription OAuth flow and the API-key flow. The region is stored with the credential, so token refresh and model requests follow it; `KIMI_CODE_REGION` answers the prompt for headless logins, and credential pool slots keep each account's region. Credentials saved before this release keep today's behaviour: `KIMI_CODE_OAUTH_HOST` / `KIMI_OAUTH_HOST`, then kimi.com. ([#1890](https://github.com/code-yeongyu/senpi/issues/1890))
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.21-2] - 2026-09-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+- Updated the test runner to Vitest 5.0.1. ([#1895](https://github.com/code-yeongyu/senpi/issues/1895))
+
+### Fixed
+
+### Removed
+
+## [2026.9.21] - 2026-09-21
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+- Updated the bundled dependencies: @anthropic-ai/sdk 0.123.0 -> 0.127.0, @aws-sdk/client-bedrock-runtime 3.1127.0 -> 3.1136.0, @google/genai 2.21.0 -> 2.23.0, @bufbuild/protobuf 2.14.0 -> 2.15.0, @smithy/types 4.17.2 -> 4.18.0, typebox 1.3.27 -> 1.3.34 and yaml 2.9.0 -> 2.9.1. ([#1895](https://github.com/code-yeongyu/senpi/issues/1895))
+
+### Fixed
+
+- Anthropic streams that report a `thinking_mismatch_allowed` input transformation no longer fail the type-check: @anthropic-ai/sdk 0.127.0 widened `input_transformations` into a union, and the streaming path now holds the union the SDK delivers. The interactive transcript still announces only `thinking_dropped` entries as dropped blocks. ([#1895](https://github.com/code-yeongyu/senpi/issues/1895))
+
+### Removed
+
+## [2026.9.20] - 2026-09-20
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Regenerating the image-model catalog leaves a file that passes `npm run check`. The generator wrote the entries with hand-written tabs and `JSON.stringify`, which spells arrays without a space after the comma and indents nested objects with two spaces, so the file it produced never matched the formatter. The shared `check` script used to rewrite it in place; once that autofix was removed, the release job became the first thing to regenerate the catalog under the strict gate and stopped there. The generator now formats the file before reporting success. ([#1886](https://github.com/code-yeongyu/senpi/issues/1886))
+
+### Removed
+
+## [2026.9.19-2] - 2026-09-19
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.19] - 2026-09-19
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-6] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-5] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-4] - 2026-09-18
+
+- Model catalog generation no longer prunes a provider shard that a committed provider module imports, so a provider models.dev stops describing cannot break the build at release time.
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-3] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+- Built-in `bai` provider for B.AI: API-key auth via `BAI_API_KEY` or `/login bai`, credential-scoped
+  `GET /v1/models` discovery, and a generated catalog of the 56 chat models B.AI documents, routed to OpenAI
+  Responses, Anthropic Messages, or OpenAI Chat Completions per model.
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18-2] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.18] - 2026-09-18
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17-4] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17-3] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17-2] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.17] - 2026-09-17
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.16-3] - 2026-09-16
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.16-2] - 2026-09-16
+
+### Breaking Changes
+
+### Added
+
+- `describeProviderStallForUser(errorMessage, options)` (`utils/retry.ts`, exported from the package root): turns a provider stream-stall watchdog message (stream-start, idle, WebSocket liveness or Responses completion) into one plain-language sentence naming the model, the stalled phase and the bound, optionally with the same-model attempts spent and the next step to take. Returns `undefined` for anything that is not a stall, so callers keep their verbatim error ([#1740](https://github.com/code-yeongyu/senpi/issues/1740)).
+
+- `EMPTY_RESPONSE_ERROR`, `EMPTY_TOOL_USE_ERROR`, `FORWARDED_EMPTY_RESPONSE_ERROR` and `FORWARDED_EMPTY_TOOL_USE_ERROR` (`utils/empty-response-errors.ts`, exported from the package root): the terminal error texts the pi-agent-core empty-assistant recovery wrapper produces, so the wrapper and the retry classifier share one definition ([#1733](https://github.com/code-yeongyu/senpi/issues/1733)).
+
+### Changed
+
+- `isRetryableErrorMessage` / `isRetryableAssistantError` classify `FORWARDED_EMPTY_RESPONSE_ERROR` and `FORWARDED_EMPTY_TOOL_USE_ERROR` as retryable, so a turn whose reasoning already streamed live before an empty stop is re-requested by the session's turn retry. The bounded "twice" variants stay non-retryable ([#1733](https://github.com/code-yeongyu/senpi/issues/1733)).
+
+### Fixed
+
+### Removed
+
+## [2026.9.16] - 2026-09-16
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.15-2] - 2026-09-15
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.15] - 2026-09-15
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Devin models no longer advertise a controllable thinking level: Cascade's chat protocol has no request-side thinking field (SWE-2 effort is selected through the lane uid), so the generic `/efforts`/`/reasoning` selector and the footer thinking suffix were a no-op second control. Streamed thinking output still renders; lane selection is the single effort control ([#1710](https://github.com/code-yeongyu/senpi/issues/1710)).
+
+### Removed
+
+## [2026.9.13-2] - 2026-09-13
+
+### Breaking Changes
+
+### Added
+
+- Added a Devin provider-module override and static Cursor/Devin public subpaths for standalone Bun consumers, keeping Node-only implementations outside browser-facing root exports ([#1656](https://github.com/code-yeongyu/senpi/issues/1656)).
+
+### Changed
+
+### Fixed
+
+- OpenAI Responses streams (SSE and WebSocket, every provider that shares the Responses processor) now treat silence after the last output item as a stall: once every `response.output_item.done` has arrived and no new item was added, `response.completed` must follow within 60 s or the turn fails as `Provider stream stalled after the last output item: response.completed timed out after 60000ms` and takes the same-model retry, instead of waiting out the 300 s idle watchdog; open items and pre-first-item silence keep the idle watchdog alone, so long reasoning is never cut ([#1648](https://github.com/code-yeongyu/senpi/issues/1648)).
+- OpenAI Codex and OpenAI Responses WebSocket streams now run a ping/pong liveness heartbeat (ping after 30 s of silence, dead after two unanswered pings), so a half-open connection fails as a provider stall in about 70 s and takes the same-model retry instead of freezing the turn for the full 300 s watchdog; on Bun a parked Codex WebSocket that the server closed is no longer reused (the proxy-aware wrapper now exposes `readyState`, and parked sockets evict themselves on `close`/`error`), which was the deterministic five-minute stall reported on gpt-5.6-sol ([#1648](https://github.com/code-yeongyu/senpi/issues/1648)).
+
+### Removed
+
+## [2026.9.13] - 2026-09-13
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.12-3] - 2026-09-12
+
+### Breaking Changes
+
+### Added
+
+- Added compact, persistable assistant-message frames with `AssistantMessageFrameEncoder` and `reduceAssistantMessageFrames()`; frames preserve the provider thinking level.
+- Added an optional timestamp argument to `uuidv7()` for follower IDs.
+- Enabled native deferred tool loading for Fireworks Messages models. Use `ToolSearch` or `tool_search` as the loader name for prompt-prefix deferral ([#9323](https://github.com/earendil-works/pi/issues/9323)).
+
+### Changed
+
+### Fixed
+
+- Added `RetryPolicy.maxAgentDelayMs` (60s by default) as a hard ceiling on agent-level retry backoff; the fork's retry-profile planner and jitter still compute the delay, and the cap is applied last ([#8826](https://github.com/earendil-works/pi/issues/8826)).
+- Fixed quadratic CPU usage when draining buffered `EventStream` events ([#9055](https://github.com/earendil-works/pi/issues/9055)).
+- Fixed Mistral Medium reasoning requests to use `reasoning_effort` for all reasoning-capable `mistral-medium-*` model IDs instead of the unsupported `prompt_mode` ([#8700](https://github.com/earendil-works/pi/issues/8700)).
+- Fixed Mistral-hosted GLM-5.2 reasoning requests to use `reasoning_effort` instead of the ignored `prompt_mode` ([#9375](https://github.com/earendil-works/pi/issues/9375)).
+- Fixed OpenCode and OpenCode Go requests to send `x-opencode-session` from `sessionId` across all supported API adapters ([#9326](https://github.com/earendil-works/pi/issues/9326)).
+- Fixed OpenAI Codex requests to send the model's Off reasoning effort instead of omitting it, while respecting unsupported Off mappings ([#9191](https://github.com/earendil-works/pi/issues/9191)).
+- Fixed OpenAI Codex SSE parsing to process terminal events that are not followed by a blank line ([#9047](https://github.com/earendil-works/pi/issues/9047)).
+- Fixed Fireworks unsigned thinking replay and reasoning effort selection using catalog metadata, with verified DeepSeek V4 and Qwen3.8 fallbacks and removal of redundant GLM 5.2 and Kimi K3 effort aliases ([#9323](https://github.com/earendil-works/pi/issues/9323)).
+- Fixed OpenRouter Anthropic Messages requests to send `x-session-id` from `sessionId` when prompt caching is enabled, matching the header Chat Completions models already sent ([#9102](https://github.com/earendil-works/pi/issues/9102)).
+- Fixed the DeepSeek catalog to advertise `deepseek-flash` for DeepSeek V4.1 Flash instead of retired Flash aliases, and refreshed DeepSeek pricing metadata ([#9423](https://github.com/earendil-works/pi/issues/9423)).
+- Removed GPT-5.4 and GPT-5.4 mini from the OpenAI Codex catalog after they became unavailable to ChatGPT accounts ([#9394](https://github.com/earendil-works/pi/issues/9394)).
+
+### Removed
+
+## [2026.9.12-2] - 2026-09-12
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Cursor model windows now follow the ceiling the server reports. Every conversation checkpoint carries `tokenDetails.maxTokens`, and that observation is recorded per model id, persisted beside the conversation rotation store and preferred over the committed capability table, so a family whose real window is smaller than the table claims no longer sizes requests against a window it does not have ([#1603](https://github.com/code-yeongyu/senpi/issues/1603)).
+
+### Removed
+
+## [2026.9.12] - 2026-09-12
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.11] - 2026-09-11
+
+### Breaking Changes
+
+### Added
+
+- Pooled OAuth credential slots now retain optional human-readable display names while preserving immutable slot identities for selection, affinity, refresh, and failover.
+- Added the Devin (Cognition) Cascade transport: `devin-agent` Connect/protobuf streaming is mapped natively onto the shared stream contract, so text, thinking, tool calls, usage and stop reasons arrive as ordinary events, a failed or content-filtered stop is surfaced as an error instead of a silent end, and a truncated turn keeps the `length` stop reason. Model discovery is authenticated with the stored credential and falls back to the bundled SWE seed when the discovery endpoint is unavailable, so an offline or rate-limited discovery never empties the model list ([#1604](https://github.com/code-yeongyu/senpi/issues/1604)).
+- Added Devin (Cognition) CLI OAuth: the authorization flow is PKCE S256 with a loopback callback on `127.0.0.1:59653` and the state validated before the code is spent, and the issued CLI token is stored with the expiry derived from its own JWT rather than an assumed lifetime ([#1601](https://github.com/code-yeongyu/senpi/issues/1601)).
+
+### Changed
+
+### Fixed
+- A provider-owned OAuth account pool is merged onto the stored pool at commit time instead of overwriting it with the pre-login snapshot, so a sibling account that rotated its refresh token or earned a rate-limit block during an interactive login is never rewound; pool slots carrying the provider's managed sentinel marker are recognized and dropped so they can never dead-end a request.
+- The auth-miss wording `Provider is not configured: <id>` is now a shared exported helper used by every throw site, so consumers keying recovery decisions off it cannot drift from the generators.
+- Claude Agent SDK `Lock file is already being held` is classified as a transient retryable error instead of an unknown/terminal failure.
+
+### Removed
+
+## [2026.9.10-2] - 2026-09-10
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Kimi For Coding sessions now identify themselves as a Kimi client. `api.kimi.com/coding` recognizes its clients by a product `User-Agent` plus a six-header `X-Msh-*` device set (platform, version, device name, device model, OS version, per-install device id), which the official Kimi Code client sends on device authorization, token poll, token refresh, and every managed request; senpi sent none of them, so a subscription session presented itself as an anonymous Anthropic-protocol client holding a Kimi bearer token. The OAuth subscription path now sends the full set on all four request paths. Header values are printable-ASCII sanitized (the endpoint answers 520 on raw non-ASCII bytes) and the device id persists under the agent dir, falling back to a per-process id when that directory is unwritable instead of throwing. The api-key path is unchanged and stays header-free, because it authenticates with a platform key rather than a client session ([#1504](https://github.com/code-yeongyu/senpi/issues/1504))
+
+### Removed
+
+## [2026.9.10] - 2026-09-10
+
+### Breaking Changes
+
+### Added
+
+- Venice AI is a built-in provider: id `venice`, `VENICE_API_KEY`, base URL `https://api.venice.ai/api/v1`, and a 104-model OpenAI-compatible catalog generated from models.dev whose ids were all confirmed against Venice's live `/models` listing. Venice's `ChatCompletionRequest` schema is `additionalProperties: false`, so a new `veniceParameters` compat flag shapes the one Venice-only request field: the catalog sets `venice_parameters: { include_venice_system_prompt: false }`, without which Venice prepends its own default system prompt ahead of the caller's ([#1551](https://github.com/code-yeongyu/senpi/issues/1551))
+
+- OpenAI images: `background`, `outputFormat`, `outputCompression`, `moderation`, and `mask` options reach the wire as `background`, `output_format`, `output_compression`, `moderation`, and a `mask` upload; transparent-with-jpeg, compression-with-png, out-of-range compression, and mask-without-image are rejected before any request. Responses report `background`, returned bytes are labeled by their magic (falling back to the requested format), image input tokens are priced with the new optional `ImagesModel.cost.imageInput` rate ($8/M for GPT Image 2 and 2.5), and `KnownImagesProvider` includes `openai`. `parseOpenAIImageOutputOptions` and the option types are exported through the compat surface.
+
+### Changed
+
+### Fixed
+
+- OAuth token refresh no longer holds the credential store lock across the network: `Models.getAuth()` runs the provider's token exchange outside `CredentialStore.modify`, then re-enters the store and writes only if the slot's refresh token is unchanged (a slot rotated meanwhile by another process is adopted instead of overwritten). Concurrent requests for one slot join a single exchange, and a `Models.refresh()`/`setProvider()` for the same provider joins an in-flight token refresh instead of aborting it through the per-provider catalog-refresh controller ([#1542](https://github.com/code-yeongyu/senpi/issues/1542)).
+
+### Removed
+
+## [2026.9.9-2] - 2026-09-09
+
+### Breaking Changes
+
+### Added
+
+- OpenAI images: `gpt-image-2.5-sunburst` and `gpt-image-2.5-flare` join the builtin catalog; `quality` accepts `xhigh` and `max`; `size` accepts any `WIDTHxHEIGHT` (16px multiples, 1:3..3:1 aspect, edges <= 3840, 655,360..8,294,400 pixels) validated before the request; image inputs are sent to `/images/edits` with up to 16 reference uploads instead of throwing. `parseOpenAIImageSize` and the quality/size types are exported through the compat surface ([#1513](https://github.com/code-yeongyu/senpi/pull/1513)).
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.9] - 2026-09-09
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Anthropic prompt caching no longer breaks on every tool continuation: when the model answers a tool call without a thinking block (the normal adaptive-thinking outcome), the follow-up request keeps the same `thinking`/`output_config` instead of degrading to disabled thinking, so the cached prefix is read instead of re-written ("cache misses every second prompt"). Only a budget-thinking request replaying a tool turn produced by another API still degrades, the case Anthropic has rejected.
+
+### Removed
+
+## [2026.9.8] - 2026-09-08
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Anthropic OAuth login no longer dead-ends on a browser page reading "State mismatch." when another senpi/omo process on the same machine still holds the callback port 53692: the login binds an ephemeral loopback port instead and carries that port through the auth URL and the token exchange. A callback that belongs to another login now explains that the login belongs to a different session and how to continue, and a login that gets neither a browser callback nor a pasted redirect URL for 10 minutes times out and releases its port instead of holding it indefinitely.
+
+- Anthropic mid-output server fallback now follows the configured abort/continue policy instead of raising an unsupported-fallback error. Continuing responses retain their serving-model identity and do not execute abandoned pre-fallback tools, including through text-tool recovery middleware.
+
+- `streamSimple` on the OpenAI Responses and Codex Responses adapters forwards the new `SimpleStreamOptions.serviceTier` into the request (`service_tier`) and tier-aware usage pricing; the simple path previously dropped it (code-yeongyu/oh-my-openagent#6795).
+
+### Removed
+
+## [2026.9.7-2] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Fixed context-overflow classification so OpenAI's "exceeds the model's context window" wording is detected and token-quota / rate-limit messages that mention tokens are not treated as overflow (code-yeongyu/oh-my-openagent#7921).
+
+### Removed
+
+## [2026.9.7] - 2026-09-07
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [2026.9.6] - 2026-09-06
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
 ## [2026.9.5-3] - 2026-09-05
 
 ### Breaking Changes
@@ -127,6 +621,7 @@
 ### Added
 
 - `OAuthPrompt` and `OAuthSelectPrompt` carry an optional `signal` so login callbacks can observe a provider abandoning a prompt (for example a manual-code prompt raced against a local callback server) ([#1316](https://github.com/code-yeongyu/senpi/issues/1316)).
+
 ### Changed
 
 ### Fixed
@@ -370,6 +865,7 @@
 
 - Changed built-in xAI models to use the Responses API with encrypted reasoning replay and made Grok 4.6 the default xAI model ([#8124](https://github.com/earendil-works/pi/pull/8124) by [@Jaaneek](https://github.com/Jaaneek)).
 - Changed the Anthropic, Azure OpenAI, Google Generative AI, Google Vertex, Mistral, OpenAI Chat Completions, and OpenAI Responses adapters to send Pi's default `User-Agent` unless overridden ([#8305](https://github.com/earendil-works/pi/issues/8305)).
+
 ### Fixed
 
 - Fixed OpenAI-compatible Chat Completions reasoning replay to preserve and resend assistant-level `reasoning_details` (`reasoning.text`, `reasoning.summary`, and `reasoning.encrypted`) verbatim and in order ([#7994](https://github.com/earendil-works/pi/issues/7994)).
@@ -584,6 +1080,7 @@
   `<invoke name="mcp_49f0-Todo">` recovers into the registered `todo` tool
   call instead of rendering as literal text. Alias collisions between
   registered tools stay literal text.
+
 ### Removed
 
 ## [2026.8.18-2] - 2026-08-18

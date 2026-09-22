@@ -34,20 +34,21 @@ export class SkillInvocationMessageComponent extends Box {
 		this.clear();
 
 		if (this.expanded) {
-			// Expanded: label + skill name header + full content
+			// Expanded: label + one name header and body per invoked skill
 			const label = theme.fg("customMessageLabel", `\x1b[1m[skill]\x1b[22m`);
 			this.addChild(new Text(label, 0, 0));
-			const header = `**${this.skillBlock.name}**\n\n`;
+			const body = this.skillBlock.skills.map((skill) => `**${skill.name}**\n\n${skill.content}`).join("\n\n");
 			this.addChild(
-				new Markdown(header + this.skillBlock.content, 0, 0, this.markdownTheme, {
+				new Markdown(body, 0, 0, this.markdownTheme, {
 					color: (text: string) => theme.fg("customMessageText", text),
 				}),
 			);
 		} else {
-			// Collapsed: single line - [skill] name (hint to expand)
+			// Collapsed: single line - [skill] names (hint to expand)
+			const names = this.skillBlock.skills.map((skill) => skill.name).join(", ");
 			const line =
 				theme.fg("customMessageLabel", `\x1b[1m[skill]\x1b[22m `) +
-				theme.fg("customMessageText", this.skillBlock.name) +
+				theme.fg("customMessageText", names) +
 				theme.fg("dim", ` (${keyText("app.tools.expand")} to expand)`);
 			this.addChild(new Text(line, 0, 0));
 		}

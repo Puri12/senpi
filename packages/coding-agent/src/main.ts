@@ -6,14 +6,12 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@earendil-works/pi-ai";
 import { setCapabilityOverrides } from "@earendil-works/pi-tui";
 import chalk from "chalk";
-import { handleA2aServerCommand } from "./cli/a2a-server-command.ts";
-import { handleAppServerCommand } from "./cli/app-server-command.ts";
-import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp } from "./cli/args.ts";
+import { type Args, type Mode, normalizeSessionName, parseArgs, printHelp, resolveSessionRuntime } from "./cli/args.ts";
 import {
 	type AuthCheckResult,
 	checkProviderAuth,
@@ -31,12 +29,20 @@ import {
 	validateAuthCommandArgs,
 } from "./cli/auth-command.ts";
 import { resolveCredentialForPrint } from "./cli/credential-print.ts";
+import {
+	dispatchA2aServerCommand,
+	dispatchAppServerCommand,
+	dispatchConfigCommand,
+	dispatchHostCommand,
+	dispatchPackageCommand,
+} from "./cli/deferred-commands.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
+import { resolveHelpExtensionFlags } from "./cli/help-extension-flags.ts";
+import { helpFlagsScope, isPlainHelpRequest, resolveHelpProjectTrust } from "./cli/help-fast-path.ts";
+import { writeHelpFlagsCache } from "./cli/help-flags-cache.ts";
 import { buildInitialMessage } from "./cli/initial-message.ts";
 import { listModels } from "./cli/list-models.ts";
-import { listTips } from "./cli/list-tips.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
-import { selectSession } from "./cli/session-picker.ts";
 import {
 	createStartupLoadingIndicator,
 	pauseIndicatorDuringPrompts,
@@ -74,21 +80,18 @@ import {
 	type SessionCwdIssue,
 } from "./core/session-cwd.ts";
 import { assertValidSessionId, SessionManager } from "./core/session-manager.ts";
+import { collectSettingsDiagnosticsWithContext } from "./core/settings-diagnostics.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { shouldJoinSharedHost } from "./core/shared-host-policy.ts";
-import { printTimings, resetTimings, time } from "./core/timings.ts";
+import { printTimings, recordTiming, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { builtInExtensions } from "./extensions/index.ts";
 import { getFromSourceRealConfigWarning } from "./from-source-config-guard.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
-import { createInteractiveHostRuntime } from "./modes/interactive/interactive-host-runtime.ts";
 import { initTheme, stopThemeWatcher } from "./modes/interactive/theme/theme.ts";
 import { runPrintMode } from "./modes/print-mode.ts";
 import { AUTO_TITLE_SESSIONS_CAPABILITY, parseClientCapabilities } from "./modes/rpc/custom-capability.ts";
-import { findInternalSupervisorArgs, parseSupervisorArgs, runHostSupervisor } from "./modes/rpc/host-lifecycle.ts";
-import { runMultiSessionHost } from "./modes/rpc/multi-session-host.ts";
-import { runRpcMode } from "./modes/rpc/rpc-mode.ts";
-import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
+import { dispatchInternalSupervisor } from "./modes/rpc/supervisor-route.ts";
 import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
 import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
 
@@ -115,16 +118,6 @@ async function readPipedStdin(): Promise<string | undefined> {
 		});
 		process.stdin.resume();
 	});
-}
-
-function collectSettingsDiagnostics(
-	settingsManager: SettingsManager,
-	context: string,
-): AgentSessionRuntimeDiagnostic[] {
-	return settingsManager.drainErrors().map(({ scope, error }) => ({
-		type: "warning",
-		message: `(${context}, ${scope} settings) ${error.message}`,
-	}));
 }
 
 function collectAuthDiagnostics(authStorage: AuthStorage, context: string): AgentSessionRuntimeDiagnostic[] {
@@ -183,20 +176,24 @@ function toProjectTrustMode(appMode: AppMode): AppMode {
 /**
  * Interactive launches auto-title by default. RPC clients can opt in through
  * `auto_title_sessions`; every other non-interactive app mode opts in with
- * `--auto-title-sessions`. Sessions resumed with existing context messages are
- * never retitled, whatever the mode, capability, or flag.
+ * `--auto-title-sessions`. A per-session `open_session.auto_title`, when present,
+ * replaces that host-wide decision for that session only. Sessions resumed with
+ * existing context messages are never retitled, whatever the mode, capability,
+ * flag, or per-session override.
  */
 export function resolveAutoTitleSessions(
 	appMode: AppMode,
 	parsed: Args,
 	hasContextMessages: boolean,
 	clientCapabilities: readonly string[] = parseClientCapabilities(envValue("RPC_CLIENT_CAPABILITIES")),
+	sessionAutoTitle?: boolean,
 ): boolean {
+	if (hasContextMessages) return false;
+	if (sessionAutoTitle !== undefined) return sessionAutoTitle;
 	return (
-		(appMode === "interactive" ||
-			parsed.autoTitleSessions === true ||
-			(appMode === "rpc" && clientCapabilities.includes(AUTO_TITLE_SESSIONS_CAPABILITY))) &&
-		!hasContextMessages
+		appMode === "interactive" ||
+		parsed.autoTitleSessions === true ||
+		(appMode === "rpc" && clientCapabilities.includes(AUTO_TITLE_SESSIONS_CAPABILITY))
 	);
 }
 
@@ -518,6 +515,7 @@ export async function createSessionManager(
 
 	if (parsed.resume) {
 		try {
+			const { selectSession } = await import("./cli/session-picker.ts");
 			const selectedPath = await selectSession(
 				(onProgress) => SessionManager.list(cwd, sessionDir, onProgress),
 				(onProgress) => SessionManager.listAll(sessionDir, onProgress),
@@ -694,260 +692,57 @@ export function applyGrokNeoThemeFallback(settingsManager: SettingsManager): voi
 	};
 }
 
-export async function main(args: string[], options?: MainOptions) {
-	resetTimings();
-	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
-	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(envValue("OFFLINE"));
-	if (offlineMode) {
-		process.env.PI_OFFLINE = "1";
-		process.env.PI_SKIP_VERSION_CHECK = "1";
-	}
+export interface CliRuntimeConfiguration {
+	parsed: Args;
+	cwd: string;
+	agentDir: string;
+	appMode: AppMode;
+}
 
-	if (await runAuthCommand(args)) {
-		return;
-	}
-
-	// Internal launch surface used by bundled/rebranded runtimes. It is deliberately
-	// not accepted by parseArgs, so existing CLI modes remain unchanged. A rebranded
-	// wrapper may prepend its own `--extension <dir>` before forwarding argv, so the
-	// route is matched through the bounded scan rather than at argv[0] alone.
-	const supervisorArgs = findInternalSupervisorArgs(args);
-	if (supervisorArgs) {
-		const launch = parseSupervisorArgs(supervisorArgs);
-		if (!launch) {
-			// Fail closed: an internal protocol fault must never fall through to the
-			// public parser and surface as a confusing "Unknown option" error.
-			console.error("invalid internal RPC host supervisor arguments");
-			process.exit(2);
-		}
-		await runHostSupervisor(launch);
-		return;
-	}
-
-	if (process.platform === "win32") {
-		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
-	}
-
-	const cwd = process.cwd();
-	const agentDir = getAgentDir();
-	const fromSourceWarning = getFromSourceRealConfigWarning(agentDir);
-	if (fromSourceWarning) {
-		console.error(chalk.yellow(fromSourceWarning));
-	}
-	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
-	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
-	configureHttpDispatcher();
-
-	if (await handlePackageCommand(args, { extensionFactories })) {
-		const exitCode = process.exitCode ?? 0;
-		if (process.platform === "win32" && exitCode === 0 && args[0] === "update") {
-			// We normally prefer process.exit(0) for package commands so bad extensions cannot keep
-			// one-shot commands alive. On Windows, Node can assert after fetch() if process.exit(0)
-			// runs during teardown; let successful `pi update` drain naturally instead.
-			// https://github.com/nodejs/node/issues/56645
-			return;
-		}
-		process.exit(exitCode);
-		return;
-	}
-
-	if (await handleConfigCommand(args, { extensionFactories })) {
-		return;
-	}
-
-	if (await handleAppServerCommand(args)) {
-		return;
-	}
-
-	if (await handleA2aServerCommand(args)) {
-		return;
-	}
-
-	const parsed = parseArgs(args);
-	if (parsed.diagnostics.length > 0) {
-		for (const d of parsed.diagnostics) {
-			const color = d.type === "error" ? chalk.red : chalk.yellow;
-			console.error(color(`${d.type === "error" ? "Error" : "Warning"}: ${d.message}`));
-		}
-		if (parsed.diagnostics.some((d) => d.type === "error")) {
-			process.exit(1);
-		}
-	}
-	time("parseArgs");
-
-	if (parsed.version) {
-		console.log(DISPLAY_VERSION);
-		process.exit(0);
-	}
-
-	if (parsed.export) {
-		let result: string;
-		try {
-			const outputPath = parsed.messages.length > 0 ? parsed.messages[0] : undefined;
-			result = await exportFromFile(parsed.export, outputPath);
-		} catch (error: unknown) {
-			const message = error instanceof Error ? error.message : "Failed to export session";
-			console.error(chalk.red(`Error: ${message}`));
-			process.exit(1);
-		}
-		console.log(`Exported to: ${result}`);
-		process.exit(0);
-	}
-
-	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
-	const shouldTakeOverStdout =
-		appMode !== "interactive" && (!isPlainRuntimeMetadataCommand(parsed) || (parsed.help && parsed.mode === "json"));
-	if (shouldTakeOverStdout) {
-		takeOverStdout();
-	}
-	if (parsed.mode === "json") {
-		const log = console.log.bind(console);
-		console.log = (...args: unknown[]) => console.error(...args);
-		process.once("exit", () => {
-			console.log = log;
+/** Fixed launch data is cloneable; UI callbacks and extension factories stay in their isolate. */
+export function createCliRuntimeFactory(
+	configuration: CliRuntimeConfiguration,
+	local: {
+		extensionFactories?: InlineExtension[];
+		startupSettingsManager?: SettingsManager;
+		startupLoadingIndicator?: ReturnType<typeof createStartupLoadingIndicator>;
+		/**
+		 * One model runtime for every session this factory creates. A shared host's
+		 * sessions all live in one agent dir, so they would each build an identical
+		 * runtime - ~100 ms of loop CPU per open that, concurrent, every open pays
+		 * N times over (senpi#1844). Provider registration is keyed by id and
+		 * merges, so replaying each session's extension providers into one runtime
+		 * is idempotent.
+		 */
+		modelRuntime?: ModelRuntime;
+	} = {},
+): CreateAgentSessionRuntimeFactory {
+	const { parsed, cwd, agentDir, appMode } = configuration;
+	const extensionFactories = local.extensionFactories ?? builtInExtensions;
+	const startupSettingsManager = local.startupSettingsManager ?? SettingsManager.create(cwd, agentDir);
+	const startupLoadingIndicator =
+		local.startupLoadingIndicator ??
+		createStartupLoadingIndicator({
+			writer: () => {},
+			isTTY: false,
+			label: `Loading ${APP_NAME}`,
 		});
-	}
-
-	if (parsed.mode === "rpc" && parsed.fileArgs.length > 0) {
-		console.error(chalk.red("Error: @file arguments are not supported in RPC mode"));
-		process.exit(1);
-	}
-
-	validateForkFlags(parsed);
-	validateSessionIdFlags(parsed);
-
-	// Run migrations (pass cwd for project-local migrations)
-	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);
-	time("runMigrations");
-
-	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
-	reportDiagnostics(collectSettingsDiagnostics(startupSettingsManager, "startup session lookup"));
+	const trustStore = new ProjectTrustStore(agentDir);
+	const projectTrustByCwd = new Map<string, boolean>();
+	const trustPromptMode: AppMode =
+		parsed.help || parsed.listModels !== undefined || parsed.listTips ? "print" : toProjectTrustMode(appMode);
 	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
 	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
 	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
 	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
-
-	if (parsed.listTips) {
-		listTips();
-		process.exit(0);
-	}
-
-	if (parsed.listModels !== undefined) {
-		const services = await createAgentSessionServices({
-			cwd,
-			agentDir,
-			settingsManager: startupSettingsManager,
-			extensionFlagValues: parsed.unknownFlags,
-			resourceLoaderOptions: {
-				additionalExtensionPaths: resolvedExtensionPaths,
-				additionalSkillPaths: resolvedSkillPaths,
-				additionalPromptTemplatePaths: resolvedPromptTemplatePaths,
-				additionalThemePaths: resolvedThemePaths,
-				noExtensions: parsed.noExtensions,
-				noSkills: true,
-				noPromptTemplates: true,
-				noThemes: true,
-				noContextFiles: true,
-				extensionFactories,
-			},
-		});
-		reportDiagnostics([
-			...services.diagnostics,
-			...collectSettingsDiagnostics(services.settingsManager, "model listing"),
-			...collectAuthDiagnostics(services.authStorage, "model listing"),
-		]);
-		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
-		await listModels(services.modelRuntime, searchPattern);
-		process.exit(0);
-	}
-
-	// Experimental first-time setup: theme choice and analytics opt-in.
-	// Runs before any runtime services are created so the chosen settings apply everywhere.
-	if (
-		appMode === "interactive" &&
-		!parsed.help &&
-		parsed.listModels === undefined &&
-		!parsed.listTips &&
-		shouldRunFirstTimeSetup()
-	) {
-		await showFirstTimeSetup(startupSettingsManager);
-		time("firstTimeSetup");
-	}
-
-	if (appMode === "interactive" && parsed.useTheme !== undefined) {
-		startupSettingsManager.applyOverrides({ theme: parsed.useTheme });
-	}
-
-	// Decide the final runtime cwd before creating cwd-bound runtime services.
-	// --session and --resume may select a session from another project, so project-local
-	// settings, resources, provider registrations, and models must be resolved only after
-	// the target session cwd is known. The startup-cwd settings manager is used only for
-	// sessionDir lookup during session selection.
-	const envSessionDir = process.env[ENV_SESSION_DIR];
-	const sessionDir =
-		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
-		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
-		startupSettingsManager.getSessionDir();
-	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager, appMode);
-	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
-	if (missingSessionCwdIssue) {
-		if (appMode === "interactive") {
-			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
-			if (!selectedCwd) {
-				process.exit(0);
-			}
-			sessionManager = SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
-		} else {
-			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
-			process.exit(1);
-		}
-	}
-	if (parsed.name !== undefined) {
-		const name = normalizeSessionName(parsed.name);
-		if (name === undefined) {
-			console.error(chalk.red("Error: --name requires a non-empty value"));
-			process.exit(1);
-		}
-		sessionManager.appendSessionInfo(name);
-	}
-	time("createSessionManager");
-
-	const trustStore = new ProjectTrustStore(agentDir);
-	const sessionCwd = sessionManager.getCwd();
-	const autoTrustOnReloadCwd =
-		parsed.projectTrustOverride === undefined && !hasTrustRequiringProjectResources(sessionCwd)
-			? sessionCwd
-			: undefined;
-	const trustPromptMode: AppMode =
-		parsed.help || parsed.listModels !== undefined || parsed.listTips ? "print" : toProjectTrustMode(appMode);
-	const projectTrustByCwd = new Map<string, boolean>();
-
-	// Immediate feedback while the heavy runtime (extensions, models, trust) is
-	// created; without it the terminal stays blank and looks stuck (codex-style
-	// UI-first startup). Stopped before any other surface writes to stdout.
-	const startupLoadingIndicator = createStartupLoadingIndicator({
-		writer: (chunk) => process.stdout.write(chunk),
-		isTTY: process.stdout.isTTY === true,
-		label: `Loading ${APP_NAME}`,
-	});
-	if (
-		shouldShowStartupLoadingIndicator({
-			appMode,
-			stdoutIsTTY: process.stdout.isTTY === true,
-			helpRequested: parsed.help === true,
-		})
-	) {
-		startupLoadingIndicator.start();
-		startupLoadingIndicator.setPhase("extensions & models");
-	}
-
-	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
+	return async ({
 		cwd,
 		agentDir,
 		sessionManager,
 		sessionStartEvent,
 		projectTrustContext,
 		launchProfile,
+		mcpRegistry,
 	}) => {
 		const isInitialRuntime = sessionStartEvent === undefined;
 		const projectTrustDiagnostics: AgentSessionRuntimeDiagnostic[] = [];
@@ -965,6 +760,8 @@ export async function main(args: string[], options?: MainOptions) {
 			cwd,
 			agentDir,
 			settingsManager: runtimeSettingsManager,
+			...(local.modelRuntime === undefined ? {} : { modelRuntime: local.modelRuntime }),
+			mcpRegistry,
 			modelRuntimeSignal: AbortSignal.timeout(15_000),
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderReloadOptions: shouldResolveProjectTrust
@@ -995,6 +792,15 @@ export async function main(args: string[], options?: MainOptions) {
 					}
 				: undefined,
 			resourceLoaderOptions: {
+				sharedHostEnabled: shouldJoinSharedHost(appMode, {
+					enableEnv: isTruthyEnvFlag(envValue("ENABLE_SHARED_HOST")),
+					settingEnabled: runtimeSettingsManager.getExperimentalSharedHost(),
+				}),
+				// Per-session identity reaches the extensions this session loads and stops
+				// there: it is deliberately NOT merged into `parsed`, so it can never move
+				// a model, an auth decision or a CLI flag.
+				sessionKind: launchProfile?.sessionKind,
+				sessionContext: launchProfile?.sessionContext,
 				additionalExtensionPaths: resolvedExtensionPaths,
 				additionalSkillPaths: resolvedSkillPaths,
 				additionalPromptTemplatePaths: resolvedPromptTemplatePaths,
@@ -1013,7 +819,7 @@ export async function main(args: string[], options?: MainOptions) {
 		const diagnostics: AgentSessionRuntimeDiagnostic[] = [
 			...projectTrustDiagnostics,
 			...services.diagnostics,
-			...collectSettingsDiagnostics(settingsManager, "runtime creation"),
+			...collectSettingsDiagnosticsWithContext(settingsManager, "runtime creation"),
 			...collectExtensionLoadDiagnostics(resourceLoader.getExtensions().errors),
 		];
 
@@ -1087,6 +893,7 @@ export async function main(args: string[], options?: MainOptions) {
 				parsed,
 				sessionManager.hasContextMessages(),
 				parseClientCapabilities(envValue("RPC_CLIENT_CAPABILITIES")),
+				launchProfile?.autoTitle,
 			),
 		});
 		const cliThinkingOverride = runtimeParsed.thinking !== undefined || cliThinkingFromModel;
@@ -1100,18 +907,250 @@ export async function main(args: string[], options?: MainOptions) {
 			diagnostics,
 		};
 	};
-	time("createRuntime");
+}
+
+export async function main(args: string[], options?: MainOptions) {
+	resetTimings();
+	// The pre-main phase - runtime boot, cli.js, and this module's static import graph - is already
+	// over when the first statement runs, so it is read from the process clock rather than measured.
+	recordTiming("processStart->main", Math.round(process.uptime() * 1000));
+	const extensionFactories = [...builtInExtensions, ...(options?.extensionFactories ?? [])];
+	const offlineMode = args.includes("--offline") || isTruthyEnvFlag(envValue("OFFLINE"));
+	if (offlineMode) {
+		process.env.PI_OFFLINE = "1";
+		process.env.PI_SKIP_VERSION_CHECK = "1";
+	}
+
+	if (await runAuthCommand(args)) {
+		return;
+	}
+
+	// Internal launch surface used by bundled/rebranded runtimes. It is deliberately
+	// not accepted by parseArgs, so existing CLI modes remain unchanged. The route and
+	// the RPC host graph behind it live in ./modes/rpc/supervisor-route.ts.
+	if (await dispatchInternalSupervisor(args)) {
+		return;
+	}
+
+	if (process.platform === "win32") {
+		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
+	}
+
+	const cwd = process.cwd();
+	const agentDir = getAgentDir();
+	const fromSourceWarning = getFromSourceRealConfigWarning(agentDir);
+	if (fromSourceWarning) {
+		console.error(chalk.yellow(fromSourceWarning));
+	}
+	const bootstrapSettingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: false });
+	applyHttpProxySettings(bootstrapSettingsManager.getGlobalSettings().httpProxy);
+	configureHttpDispatcher();
+
+	if (await dispatchPackageCommand(args, { extensionFactories })) {
+		const exitCode = process.exitCode ?? 0;
+		if (process.platform === "win32" && exitCode === 0 && args[0] === "update") {
+			// We normally prefer process.exit(0) for package commands so bad extensions cannot keep
+			// one-shot commands alive. On Windows, Node can assert after fetch() if process.exit(0)
+			// runs during teardown; let successful `pi update` drain naturally instead.
+			// https://github.com/nodejs/node/issues/56645
+			return;
+		}
+		process.exit(exitCode);
+		return;
+	}
+
+	if (await dispatchConfigCommand(args, { extensionFactories })) {
+		return;
+	}
+
+	if (await dispatchAppServerCommand(args)) {
+		return;
+	}
+
+	if (await dispatchA2aServerCommand(args)) {
+		return;
+	}
+
+	// The shared-daemon command: one JSON line on stdout and an exit code that classifies it, so it
+	// exits here rather than falling through into argument parsing and the interactive path.
+	const hostExitCode = await dispatchHostCommand(args);
+	if (hostExitCode !== undefined) {
+		process.exit(hostExitCode);
+	}
+
+	const parsed = parseArgs(args);
+	if (parsed.diagnostics.length > 0) {
+		for (const d of parsed.diagnostics) {
+			const color = d.type === "error" ? chalk.red : chalk.yellow;
+			console.error(color(`${d.type === "error" ? "Error" : "Warning"}: ${d.message}`));
+		}
+		if (parsed.diagnostics.some((d) => d.type === "error")) {
+			process.exit(1);
+		}
+	}
+	time("parseArgs");
+
+	if (parsed.version) {
+		console.log(DISPLAY_VERSION);
+		process.exit(0);
+	}
+
+	if (parsed.export) {
+		let result: string;
+		try {
+			const outputPath = parsed.messages.length > 0 ? parsed.messages[0] : undefined;
+			result = await exportFromFile(parsed.export, outputPath);
+		} catch (error: unknown) {
+			const message = error instanceof Error ? error.message : "Failed to export session";
+			console.error(chalk.red(`Error: ${message}`));
+			process.exit(1);
+		}
+		console.log(`Exported to: ${result}`);
+		process.exit(0);
+	}
+
+	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
+	const shouldTakeOverStdout =
+		appMode !== "interactive" && (!isPlainRuntimeMetadataCommand(parsed) || (parsed.help && parsed.mode === "json"));
+	if (shouldTakeOverStdout) {
+		takeOverStdout();
+	}
+	if (parsed.mode === "json") {
+		const log = console.log.bind(console);
+		console.log = (...args: unknown[]) => console.error(...args);
+		process.once("exit", () => {
+			console.log = log;
+		});
+	}
+
+	if (parsed.mode === "rpc" && parsed.fileArgs.length > 0) {
+		console.error(chalk.red("Error: @file arguments are not supported in RPC mode"));
+		process.exit(1);
+	}
+
+	validateForkFlags(parsed);
+	validateSessionIdFlags(parsed);
+
+	// Run migrations (pass cwd for project-local migrations)
+	const { migratedAuthProviders: migratedProviders, deprecationWarnings } = runMigrations(cwd);
+	time("runMigrations");
+
+	const startupSettingsManager = SettingsManager.create(cwd, agentDir);
+	reportDiagnostics(collectSettingsDiagnosticsWithContext(startupSettingsManager, "startup session lookup"));
+	const resolvedExtensionPaths = resolveCliPaths(cwd, parsed.extensions);
+	const resolvedSkillPaths = resolveCliPaths(cwd, parsed.skills);
+	const resolvedPromptTemplatePaths = resolveCliPaths(cwd, parsed.promptTemplates);
+	const resolvedThemePaths = resolveCliPaths(cwd, parsed.themes);
+
+	// Help is answered from the flags alone, so it stops here instead of continuing into the model
+	// runtime, the session manager and the rest of the resource load. The flags are cached for the
+	// next run, which `cli.ts` then answers before this module is even imported.
+	if (isPlainHelpRequest(parsed)) {
+		const projectTrusted = resolveHelpProjectTrust(parsed, cwd, agentDir);
+		const scope = helpFlagsScope(parsed, cwd, agentDir, projectTrusted);
+		const { flags, extensionPaths } = await resolveHelpExtensionFlags({
+			cwd,
+			agentDir,
+			settingsManager: SettingsManager.create(cwd, agentDir, { projectTrusted }),
+			additionalExtensionPaths: resolvedExtensionPaths ?? [],
+			noExtensions: parsed.noExtensions === true,
+			...(extensionFactories ? { extensionFactories } : {}),
+		});
+		printHelp(flags);
+		writeHelpFlagsCache({ scope, flags, extensionPaths });
+		printTimings();
+		process.exit(0);
+	}
+
+	if (parsed.listTips) {
+		const { listTips } = await import("./cli/list-tips.ts");
+		listTips();
+		process.exit(0);
+	}
+
+	if (parsed.listModels !== undefined) {
+		const services = await createAgentSessionServices({
+			cwd,
+			agentDir,
+			settingsManager: startupSettingsManager,
+			extensionFlagValues: parsed.unknownFlags,
+			resourceLoaderOptions: {
+				additionalExtensionPaths: resolvedExtensionPaths,
+				additionalSkillPaths: resolvedSkillPaths,
+				additionalPromptTemplatePaths: resolvedPromptTemplatePaths,
+				additionalThemePaths: resolvedThemePaths,
+				noExtensions: parsed.noExtensions,
+				noSkills: true,
+				noPromptTemplates: true,
+				noThemes: true,
+				noContextFiles: true,
+				extensionFactories,
+			},
+		});
+		reportDiagnostics([
+			...services.diagnostics,
+			...collectSettingsDiagnosticsWithContext(services.settingsManager, "model listing"),
+			...collectAuthDiagnostics(services.authStorage, "model listing"),
+		]);
+		const searchPattern = typeof parsed.listModels === "string" ? parsed.listModels : undefined;
+		await listModels(services.modelRuntime, searchPattern);
+		process.exit(0);
+	}
+
+	// Experimental first-time setup: theme choice and analytics opt-in.
+	// Runs before any runtime services are created so the chosen settings apply everywhere.
+	if (
+		appMode === "interactive" &&
+		!parsed.help &&
+		parsed.listModels === undefined &&
+		!parsed.listTips &&
+		shouldRunFirstTimeSetup()
+	) {
+		await showFirstTimeSetup(startupSettingsManager);
+		time("firstTimeSetup");
+	}
+
+	if (appMode === "interactive" && parsed.useTheme !== undefined) {
+		startupSettingsManager.applyOverrides({ theme: parsed.useTheme });
+	}
+
 	if (appMode === "rpc" && parsed.multiSession) {
-		// The multi-session host never returns, so the initTheme() call further down
-		// is unreachable on this path. Extensions loaded per open_session (and any
-		// tool render helper) read the theme proxy and would otherwise crash with
-		// "Theme not initialized. Call initTheme() first." (surfaced in embedders
-		// like T3 Code as transcript errors).
+		if (options?.extensionFactories?.length)
+			throw new Error("Shared RPC workers require file-backed extensions; inline factories cannot cross isolates");
+		const runtimeConfiguration = { parsed, cwd, agentDir, appMode };
+		// Socket hosts (the machine-wide daemon) run every session IN this process:
+		// createHostCore selects the worker registry only when a workerConfiguration
+		// is passed, so withholding it is what selects the uncapped in-process registry.
+		const sessionRuntime = resolveSessionRuntime(parsed);
+		const { runMultiSessionHost } = await import("./modes/rpc/multi-session-host.ts");
+		// In-process sessions share the host's model runtime: one agent dir, one
+		// catalog. Worker sessions build their own inside the isolate - an object
+		// cannot cross that boundary - so the shared one is offered only here.
+		const hostModelRuntime =
+			sessionRuntime === "worker"
+				? undefined
+				: await ModelRuntime.create({
+						credentials: AuthStorage.create(join(agentDir, "auth.json")),
+						authPath: join(agentDir, "auth.json"),
+						agentDir,
+						modelsPath: join(agentDir, "models.json"),
+						signal: AbortSignal.timeout(15_000),
+					});
+		// The multi-session host below never returns, so the initTheme() call further
+		// down main() is unreachable on this path. Extensions load per open_session and
+		// read the theme proxy: the worker runtime initializes the theme inside each
+		// session worker, but the in-process runtime (the socket-host default) shares
+		// this process, so the host must initialize the theme before serving sessions -
+		// otherwise theme-touching extensions fail with "Theme not initialized. Call
+		// initTheme() first." (senpi#1894).
 		initTheme(startupSettingsManager.getTheme(), false);
 		printTimings();
 		await runMultiSessionHost({
 			agentDir,
-			createRuntime,
+			createRuntime: createCliRuntimeFactory(runtimeConfiguration, {
+				...(hostModelRuntime === undefined ? {} : { modelRuntime: hostModelRuntime }),
+			}),
+			...(sessionRuntime === "worker" ? { workerConfiguration: runtimeConfiguration } : {}),
 			cwd,
 			creationModel:
 				parsed.provider && parsed.model ? { provider: parsed.provider, modelId: parsed.model } : undefined,
@@ -1119,6 +1158,71 @@ export async function main(args: string[], options?: MainOptions) {
 			listen: parsed.listen,
 		});
 	}
+
+	// Decide the final runtime cwd before creating cwd-bound runtime services.
+	// --session and --resume may select a session from another project, so project-local
+	// settings, resources, provider registrations, and models must be resolved only after
+	// the target session cwd is known. The startup-cwd settings manager is used only for
+	// sessionDir lookup during session selection.
+	const envSessionDir = process.env[ENV_SESSION_DIR];
+	const sessionDir =
+		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
+		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
+		startupSettingsManager.getSessionDir();
+	let sessionManager = await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager, appMode);
+	const missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManager, cwd);
+	if (missingSessionCwdIssue) {
+		if (appMode === "interactive") {
+			const selectedCwd = await promptForMissingSessionCwd(missingSessionCwdIssue, startupSettingsManager);
+			if (!selectedCwd) {
+				process.exit(0);
+			}
+			sessionManager = SessionManager.open(missingSessionCwdIssue.sessionFile!, sessionDir, selectedCwd);
+		} else {
+			console.error(chalk.red(new MissingSessionCwdError(missingSessionCwdIssue).message));
+			process.exit(1);
+		}
+	}
+	if (parsed.name !== undefined) {
+		const name = normalizeSessionName(parsed.name);
+		if (name === undefined) {
+			console.error(chalk.red("Error: --name requires a non-empty value"));
+			process.exit(1);
+		}
+		sessionManager.appendSessionInfo(name);
+	}
+	time("createSessionManager");
+
+	const sessionCwd = sessionManager.getCwd();
+	const autoTrustOnReloadCwd =
+		parsed.projectTrustOverride === undefined && !hasTrustRequiringProjectResources(sessionCwd)
+			? sessionCwd
+			: undefined;
+
+	// Immediate feedback while the heavy runtime (extensions, models, trust) is
+	// created; without it the terminal stays blank and looks stuck (codex-style
+	// UI-first startup). Stopped before any other surface writes to stdout.
+	const startupLoadingIndicator = createStartupLoadingIndicator({
+		writer: (chunk) => process.stdout.write(chunk),
+		isTTY: process.stdout.isTTY === true,
+		label: `Loading ${APP_NAME}`,
+	});
+	if (
+		shouldShowStartupLoadingIndicator({
+			appMode,
+			stdoutIsTTY: process.stdout.isTTY === true,
+			helpRequested: parsed.help === true,
+		})
+	) {
+		startupLoadingIndicator.start();
+		startupLoadingIndicator.setPhase("extensions & models");
+	}
+
+	const createRuntime = createCliRuntimeFactory(
+		{ parsed, cwd, agentDir, appMode },
+		{ extensionFactories, startupSettingsManager, startupLoadingIndicator },
+	);
+	time("createRuntime");
 	const runtime = await createAgentSessionRuntime(createRuntime, {
 		cwd: sessionManager.getCwd(),
 		agentDir,
@@ -1142,6 +1246,7 @@ export async function main(args: string[], options?: MainOptions) {
 		})
 	) {
 		const socket = envValue("RPC_SOCKET") ?? resolve(agentDir, "rpc", "rpc.sock");
+		const { createInteractiveHostRuntime } = await import("./modes/interactive/interactive-host-runtime.ts");
 		selectedRuntime = await createInteractiveHostRuntime(runtime, {
 			socket,
 			agentDir,
@@ -1154,13 +1259,21 @@ export async function main(args: string[], options?: MainOptions) {
 	applyHttpProxySettings(settingsManager.getGlobalSettings().httpProxy);
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 
+	const loadedExtensions = resourceLoader.getExtensions().extensions;
+	const extensionFlags = loadedExtensions.flatMap((extension) => Array.from(extension.flags.values()));
 	if (parsed.help) {
-		const extensionFlags = resourceLoader
-			.getExtensions()
-			.extensions.flatMap((extension) => Array.from(extension.flags.values()));
 		printHelp(extensionFlags);
 		process.exit(0);
 	}
+	time("extensionFlags");
+	// Every full launch refreshes what `--help` reads, so the fast path stays warm without a help
+	// run of its own.
+	writeHelpFlagsCache({
+		scope: helpFlagsScope(parsed, cwd, agentDir, settingsManager.isProjectTrusted()),
+		flags: extensionFlags,
+		extensionPaths: loadedExtensions.map((extension) => extension.resolvedPath),
+	});
+	time("helpFlagsCache");
 
 	// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
 	let stdinContent: string | undefined;
@@ -1224,6 +1337,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (appMode === "rpc") {
+		const { runRpcMode } = await import("./modes/rpc/rpc-mode.ts");
 		printTimings();
 		await runRpcMode(runtime);
 	} else if (appMode === "interactive") {
@@ -1258,7 +1372,9 @@ export async function main(args: string[], options?: MainOptions) {
 			if (process.stderr.writableLength > 0) {
 				await new Promise<void>((resolve) => process.stderr.once("drain", resolve));
 			}
-			return;
+			// Benchmark runs leave the TUI's terminal handles active, so returning here only parks the
+			// loop; the measurement is complete, so the process ends with it.
+			process.exit(0);
 		}
 
 		printTimings();

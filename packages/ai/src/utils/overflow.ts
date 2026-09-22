@@ -11,6 +11,7 @@ import type { AssistantMessage } from "../types.ts";
  * - Anthropic: "prompt is too long: 213462 tokens > 200000 maximum"
  * - Anthropic: "413 {\"error\":{\"type\":\"request_too_large\",\"message\":\"Request exceeds the maximum size\"}}"
  * - OpenAI: "Your input exceeds the context window of this model"
+ * - OpenAI: "Your input exceeds the model's context window" / "exceeds this model's context window"
  * - OpenAI/LiteLLM: "Requested token count exceeds the model's maximum context length of 131072 tokens"
  * - OpenAI-compatible: "Input length (265330) exceeds model's maximum context length (262144)."
  * - Google: "The input token count (1196265) exceeds the maximum number of tokens allowed (1048575)"
@@ -43,7 +44,7 @@ const OVERFLOW_PATTERNS = [
 	/prompt is too long/i, // Anthropic token overflow
 	/request_too_large/i, // Anthropic request byte-size overflow (HTTP 413)
 	/input is too long for requested model/i, // Amazon Bedrock
-	/exceeds the context window/i, // OpenAI (Completions & Responses API)
+	/exceeds (?:(?:the|this) )?(?:model'?s )?context window/i, // OpenAI (Completions & Responses API)
 	/exceeds (?:the )?(?:model'?s )?maximum context length(?: of [\d,]+ tokens?|\s*\([\d,]+\))/i, // OpenAI-compatible proxies (LiteLLM)
 	/input token count.*exceeds the maximum/i, // Google (Gemini)
 	/maximum prompt length is \d+/i, // xAI (Grok)
@@ -77,12 +78,22 @@ const OVERFLOW_PATTERNS = [
  *
  * Example: Bedrock formats throttling errors as "ThrottlingException: Too many tokens,
  * please wait before trying again." which would match the /too many tokens/i overflow
- * pattern without this exclusion.
+ * pattern without this exclusion. Token-quota / TPM messages such as "Too many tokens
+ * per minute" or "This request exceeds the limit of 30000 tokens per minute" similarly
+ * match generic overflow fallbacks and must stay on the rate-limit path.
  */
 const NON_OVERFLOW_PATTERNS = [
 	/^(Throttling error|Service unavailable):/i, // AWS Bedrock non-overflow errors (human-readable prefixes from formatBedrockError)
 	/rate limit/i, // Generic rate limiting
 	/too many requests/i, // Generic HTTP 429 style
+	/tokens per (?:min|minute|hour|day)/i, // Token-quota windows (TPM/TPH/TPD), not context size
+	/\bTPM\b/i, // Tokens-per-minute abbreviation
+	/\bRPM\b/i, // Requests-per-minute abbreviation
+	/quota exceeded/i, // Provider quota, not context window
+	/retry (?:after|in) \d/i, // Retry-after rate-limit wording
+	/^429\b/, // HTTP 429 prefix
+	/status code 429/i, // HTTP 429 mentioned mid-message
+	/overloaded/i, // Provider capacity, not context size
 ];
 
 /**
@@ -111,7 +122,7 @@ const RESOURCE_EXHAUSTED_PATTERN = /resource.?exhausted/i;
  *
  * **Reliable detection (returns error with detectable message):**
  * - Anthropic: "prompt is too long: X tokens > Y maximum" or "request_too_large"
- * - OpenAI (Completions & Responses): "exceeds the context window", "exceeds the model's maximum context length of X tokens", or "exceeds model's maximum context length (X)"
+ * - OpenAI (Completions & Responses): "exceeds the context window", "exceeds the model's context window", "exceeds this model's context window", "exceeds the model's maximum context length of X tokens", or "exceeds model's maximum context length (X)"
  * - Google Gemini: "input token count exceeds the maximum"
  * - xAI (Grok): "maximum prompt length is X but request contains Y"
  * - Groq: "reduce the length of the messages"

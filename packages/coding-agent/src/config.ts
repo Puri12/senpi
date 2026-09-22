@@ -26,6 +26,10 @@ export const isBunBinary =
 /** Detect if Bun is the runtime (compiled binary or bun run) */
 export const isBunRuntime = !!process.versions.bun;
 
+/** Detect the esbuild-bundled Node.js distribution. */
+declare const PI_BUNDLED_NODE: boolean;
+export const isBundledNode = typeof PI_BUNDLED_NODE !== "undefined" && PI_BUNDLED_NODE;
+
 // =============================================================================
 // Install Method Detection
 // =============================================================================
@@ -411,6 +415,61 @@ export function getPackageDir(): string {
 	return findNodePackageDir(__dirname);
 }
 
+/** One asset directory shipped with the package, in both the Bun-binary and Node layouts. */
+interface ShippedAsset {
+	/** Directory name next to a compiled Bun binary. */
+	readonly binaryDir: string;
+	/** Path segments under the package's src/ or dist/ root. */
+	readonly sourceSegments: readonly string[];
+	/** A file the directory must contain; a root without it does not ship this asset. */
+	readonly probe: string;
+}
+
+const THEMES_ASSET: ShippedAsset = {
+	binaryDir: "theme",
+	sourceSegments: ["modes", "interactive", "theme"],
+	probe: "dark.json",
+};
+
+const EXPORT_TEMPLATE_ASSET: ShippedAsset = {
+	binaryDir: "export-html",
+	sourceSegments: ["core", "export-html"],
+	probe: "template.html",
+};
+
+const INTERACTIVE_ASSETS: ShippedAsset = {
+	binaryDir: "assets",
+	sourceSegments: ["modes", "interactive", "assets"],
+	probe: "clankolas.png",
+};
+
+function assetDirIn(root: string, asset: ShippedAsset): string {
+	if (isBunBinary) {
+		return join(root, asset.binaryDir);
+	}
+	const srcOrDist = existsSync(join(root, "src")) ? "src" : "dist";
+	return join(root, srcOrDist, ...asset.sourceSegments);
+}
+
+/**
+ * Resolve a shipped asset directory, preferring PACKAGE_DIR but never trusting it blindly.
+ *
+ * PACKAGE_DIR relocates the package root (Nix/Guix store paths), and a Bun binary that embeds this
+ * CLI pins it to the binary's own root. When such a root is inherited by a Node install of the CLI,
+ * the Node layout resolves under it to a directory that cannot exist and startup dies on ENOENT
+ * (an omo binary keeps its themes in a flat theme/, so the inherited root has no dist/ tree at all).
+ * Fall back to the running install whenever the preferred root does not actually ship the asset. When
+ * neither ships it the install is genuinely broken, and the running install's own path is returned so
+ * the resulting error names the tree that was supposed to carry the asset rather than a foreign root.
+ */
+function resolveShippedAssetDir(asset: ShippedAsset): string {
+	const preferred = assetDirIn(getPackageDir(), asset);
+	if (existsSync(join(preferred, asset.probe))) {
+		return preferred;
+	}
+	return assetDirIn(isBunBinary ? dirname(process.execPath) : findNodePackageDir(__dirname), asset);
+}
+
 /**
  * Get path to built-in themes directory (shipped with package)
  * - For Bun binary: theme/ next to executable
@@ -418,13 +477,7 @@ export function getPackageDir(): string {
  * - For tsx (src/): src/modes/interactive/theme/
  */
 export function getThemesDir(): string {
-	if (isBunBinary) {
-		return join(getPackageDir(), "theme");
-	}
-	// Theme is in modes/interactive/theme/ relative to src/ or dist/
-	const packageDir = getPackageDir();
-	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
-	return join(packageDir, srcOrDist, "modes", "interactive", "theme");
+	return resolveShippedAssetDir(THEMES_ASSET);
 }
 
 /**
@@ -434,12 +487,7 @@ export function getThemesDir(): string {
  * - For tsx (src/): src/core/export-html/
  */
 export function getExportTemplateDir(): string {
-	if (isBunBinary) {
-		return join(getPackageDir(), "export-html");
-	}
-	const packageDir = getPackageDir();
-	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
-	return join(packageDir, srcOrDist, "core", "export-html");
+	return resolveShippedAssetDir(EXPORT_TEMPLATE_ASSET);
 }
 
 /** Get path to package.json */
@@ -474,12 +522,7 @@ export function getChangelogPath(): string {
  * - For tsx (src/): src/modes/interactive/assets/
  */
 export function getInteractiveAssetsDir(): string {
-	if (isBunBinary) {
-		return join(getPackageDir(), "assets");
-	}
-	const packageDir = getPackageDir();
-	const srcOrDist = existsSync(join(packageDir, "src")) ? "src" : "dist";
-	return join(packageDir, srcOrDist, "modes", "interactive", "assets");
+	return resolveShippedAssetDir(INTERACTIVE_ASSETS);
 }
 
 /** Get path to a bundled interactive asset */

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { writeFileSync } from "fs";
+import { execFileSync } from "child_process";
+import { existsSync, writeFileSync } from "fs";
 import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import type { ImagesApi, ImagesModel } from "../src/types.ts";
@@ -8,6 +9,7 @@ import type { ImagesApi, ImagesModel } from "../src/types.ts";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const packageRoot = join(__dirname, "..");
+const repositoryRoot = join(packageRoot, "..", "..");
 const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 function readStrictOption(args: string[]): boolean {
@@ -92,21 +94,44 @@ export function parseOpenRouterImageModels(
 // Static OpenAI image models. The OpenRouter fetch below stays the only live
 // source; these entries are hand-authored because OpenAI's own API exposes no
 // public image-model catalog to fetch from.
-// Costs quoted from models.dev (https://models.dev/api.json, openai provider)
-// as of 2026-08-11: gpt-image-2 $5 input / $30 output / $1.25 cache-read per
-// 1M tokens; gpt-image-1.5 has no models.dev cost entry as of that date, so
-// its cost is zero-filled until pricing is published.
-// Input is ["text"] only: the v1 generations endpoint is text-only.
+// Source: platform.openai.com model pages, verified 2026-09-09:
+// https://platform.openai.com/docs/models/gpt-image-2.5-sunburst
+// https://platform.openai.com/docs/models/gpt-image-2.5-flare
+// https://platform.openai.com/docs/models/gpt-image-2
+// GPT Image 2/2.5: $5 text input / $8 image input / $30 image output / $1.25
+// cache-read per 1M tokens (`imageInput` prices reference and edit inputs).
+// Keep the existing gpt-image-1.5 zero-filled pricing unchanged.
+// GPT Image 2/2.5 accept text generation and reference images via /images/edits.
 const OPENAI_IMAGE_MODELS: ImagesModel<"openai-images">[] = [
+	{
+		id: "gpt-image-2.5-sunburst",
+		name: "GPT Image 2.5 Sunburst",
+		api: "openai-images",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+		input: ["text", "image"],
+		output: ["image"],
+		cost: { input: 5, output: 30, cacheRead: 1.25, cacheWrite: 0, imageInput: 8 },
+	},
+	{
+		id: "gpt-image-2.5-flare",
+		name: "GPT Image 2.5 Flare",
+		api: "openai-images",
+		provider: "openai",
+		baseUrl: "https://api.openai.com/v1",
+		input: ["text", "image"],
+		output: ["image"],
+		cost: { input: 5, output: 30, cacheRead: 1.25, cacheWrite: 0, imageInput: 8 },
+	},
 	{
 		id: "gpt-image-2",
 		name: "GPT Image 2",
 		api: "openai-images",
 		provider: "openai",
 		baseUrl: "https://api.openai.com/v1",
-		input: ["text"],
+		input: ["text", "image"],
 		output: ["image"],
-		cost: { input: 5, output: 30, cacheRead: 1.25, cacheWrite: 0 },
+		cost: { input: 5, output: 30, cacheRead: 1.25, cacheWrite: 0, imageInput: 8 },
 	},
 	{
 		id: "gpt-image-1.5",
@@ -174,12 +199,28 @@ ${providerEntries}
 `;
 }
 
+/**
+ * Hands the emitted file to Biome so it lands in the repository already
+ * satisfying the read-only `npm run check` gate. The serializer writes tabs by
+ * hand and leans on JSON.stringify for arrays and the cost object, neither of
+ * which matches Biome's own output, so the file used to reach the tree
+ * unformatted and was silently rewritten by the `biome check --write` that the
+ * shared `check` script ran. Once that autofix was removed the drift surfaced
+ * for the first time inside the release job, which regenerates this catalog.
+ */
+function formatGeneratedFile(filePath: string): void {
+	const local = join(repositoryRoot, "node_modules", ".bin", "biome");
+	const biome = existsSync(local) ? local : "biome";
+	execFileSync(biome, ["check", "--write", filePath], { stdio: "inherit" });
+}
+
 async function main(): Promise<void> {
 	const strict = readStrictOption(process.argv.slice(2));
 	const models = await fetchOpenRouterImageModels(strict);
 	const output = generateImageModelsFile(models);
 	const outputPath = join(packageRoot, "src", "image-models.generated.ts");
 	writeFileSync(outputPath, output, "utf-8");
+	formatGeneratedFile(outputPath);
 	console.log(`Generated ${outputPath}`);
 }
 

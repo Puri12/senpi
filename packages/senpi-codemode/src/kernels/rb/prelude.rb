@@ -140,11 +140,20 @@ def __senpi_bridge_request(path, payload)
   return body["value"] if body.is_a?(Hash) && body["ok"] == true
 
   error = body.is_a?(Hash) ? body["error"] : body
-  raise(error.is_a?(Hash) ? error["message"].to_s : error.to_s)
+  raise SenpiBridgeError.new(error.is_a?(Hash) ? error["message"].to_s : error.to_s, error.is_a?(Hash) ? error["code"] : nil)
 end
 
 def __senpi_call_tool(name, args)
   __senpi_bridge_request("/call", { "callId" => "rb-#{Process.pid}-#{rand(1_000_000)}", "toolName" => name, "args" => args })
+end
+
+class SenpiBridgeError < StandardError
+  attr_reader :code
+
+  def initialize(message, code = nil)
+    super(message)
+    @code = code
+  end
 end
 
 class SenpiToolCallable
@@ -177,6 +186,8 @@ def tool
   $__senpi_tool_proxy ||= SenpiToolProxy.new
 end
 
+require_relative "workpool"
+
 def completion(prompt, model: "default", system: nil, schema: nil, **kwargs)
   options = { "model" => model }.merge(kwargs.transform_keys(&:to_s))
   options["system"] = system unless system.nil?
@@ -202,6 +213,10 @@ def output(*ids, format: "raw", offset: nil, limit: nil)
   __senpi_call_tool(SENPI_RESERVED_OUTPUT_TOOL, args)
 end
 
+# isolated/apply/merge need a host that supports isolation; otherwise a warning.
+# merge: "patch"/"branch" (false/true aliases). Unapplied foreground changes raise
+# an error with recovery instructions. Handles return immediately: await completion
+# notification or read task_output for the isolation result.
 def agent(prompt, agent: "task", model: nil, label: nil, schema: nil, isolated: nil, apply: nil, merge: nil, handle: false)
   args = { "prompt" => prompt.to_s, "agent" => agent }
   { "model" => model, "label" => label, "schema" => schema, "isolated" => isolated, "apply" => apply, "merge" => merge }.each do |key, value|
@@ -213,8 +228,10 @@ def agent(prompt, agent: "task", model: nil, label: nil, schema: nil, isolated: 
   text_value = record.fetch("text", response)
   result = schema.nil? ? text_value : record.key?("data") ? record["data"] : JSON.parse(text_value.to_s)
   return result unless handle
-  { "text" => text_value, "output" => text_value, "handle" => record["handle"] || (record["id"] && "agent://#{record["id"]}"), "id" => record["id"], "agent" => record.fetch("agent", agent) }.tap do |node|
+  { "text" => text_value, "output" => text_value, "handle" => record["handle"] || (record["id"] && "agent://#{record["id"]}"), "id" => record["id"], "run_epoch" => record["run_epoch"], "agent" => record.fetch("agent", agent) }.tap do |node|
     node["data"] = result unless schema.nil?
+    details = record["details"]
+    node["details"] = { "isolation" => details["isolation"] } if details.is_a?(Hash) && details.key?("isolation")
   end
 end
 

@@ -13,6 +13,21 @@ describe("extension loader", () => {
 		vi.resetModules();
 	});
 
+	it("leaves jiti unloaded when all extension factories are already available", async () => {
+		// Given: module evaluation itself is observed, not only createJiti calls.
+		const importJiti = vi.fn(async () => ({ createJiti: vi.fn() }));
+		vi.doMock("jiti/static", importJiti);
+		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
+		// When
+		const result = await loadExtensions(["known.js"], "/tmp", undefined, undefined, {
+			factoryResolver: () => () => {},
+		});
+		// Then
+		expect(result.errors).toEqual([]);
+		expect(result.extensions).toHaveLength(1);
+		expect(importJiti).not.toHaveBeenCalled();
+	});
+
 	it("reuses one jiti importer when loading an extension batch", async () => {
 		const extensionFactory: ExtensionFactory = (pi: ExtensionAPI) => {
 			pi.registerCommand("mock-command", {
@@ -24,9 +39,11 @@ describe("extension loader", () => {
 			import: importExtension,
 		}));
 
-		vi.doMock("jiti/static", () => ({ createJiti }));
+		// Given: loading the Node-only module is asynchronous.
+		vi.doMock("jiti/static", async () => ({ createJiti }));
 		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
 
+		// When
 		const result = await loadExtensions(["first.js", "second.js"], "/tmp");
 
 		expect(result.errors).toHaveLength(0);
@@ -55,6 +72,22 @@ describe("extension loader", () => {
 
 		expect(result.errors).toHaveLength(0);
 		expect(capturedApi?.cwd).toBe(sessionCwd);
+	});
+
+	it("exposes the effective shared-host policy during extension registration", async () => {
+		let capturedPolicy: boolean | undefined;
+		const extensionFactory: ExtensionFactory = (pi) => {
+			capturedPolicy = (pi as ExtensionAPI & { readonly sharedHostEnabled?: boolean }).sharedHostEnabled;
+		};
+		const importExtension = vi.fn(async () => extensionFactory);
+		const createJiti = vi.fn(() => ({ import: importExtension }));
+
+		vi.doMock("jiti/static", () => ({ createJiti }));
+		const { loadExtensions } = await import("../src/core/extensions/loader.ts");
+
+		await loadExtensions(["first.js"], "/tmp", undefined, undefined, { sharedHostEnabled: true });
+
+		expect(capturedPolicy).toBe(true);
 	});
 
 	it("prefers bundled package aliases when the local coding-agent package carries dependencies", async () => {

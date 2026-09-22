@@ -10,6 +10,11 @@ dist/
 target/
 **/*.rs.bk
 
+# Native grep addons are never tracked. napi writes senpi_grep.<tag>.node into
+# the crate dir; host copies are staged under coding-agent at publish time.
+packages/coding-agent/native/prebuilds/
+crates/senpi-grep/*.node
+
 # Rust workspace
 target/
 **/*.rs.bk
@@ -51,6 +56,7 @@ packages/ai/src/providers/.model-generation-*/
 # Package specific
 .npm/
 coverage/
+.vitest/
 .nyc_output/
 .pi_config/
 tui-debug.log
@@ -73,3 +79,4 @@ collect.sh
 # Ephemeral agent working state. Existing tracked archives remain tracked,
 # but new untracked files must never block a release commit.
 .omo/
+packages/agent/docs/extensions/pi-server-artifact/index.md

@@ -70,6 +70,23 @@ export function forgetBinding(senpiSessionId: string): void {
 	bindings.delete(senpiSessionId);
 }
 
+/**
+ * Reason the newest ledger record invalidated this session's binding. Held next
+ * to the binding it replaced so the next continuity decision can name the real
+ * cause instead of the no-record default: a restart re-reads it from the branch
+ * (session-registry-wiring), and a committed turn retires it with the marker.
+ */
+const bindingInvalidations = new Map<string, string>();
+
+export function rememberBindingInvalidation(senpiSessionId: string, reason: string | undefined): void {
+	if (reason === undefined) bindingInvalidations.delete(senpiSessionId);
+	else bindingInvalidations.set(senpiSessionId, reason);
+}
+
+export function bindingInvalidationReason(senpiSessionId: string): string | undefined {
+	return bindingInvalidations.get(senpiSessionId);
+}
+
 export function bindingFromEntry(
 	entry: Pick<
 		ClaudeSdkOauthSessionEntry,
@@ -132,15 +149,24 @@ async function awaitInitialization(entry: ClaudeSdkOauthSessionEntry, signal?: A
 		await initialize.call(entry.query);
 		return;
 	}
-	const aborted = new Promise<never>((_resolve, reject) => {
-		const onAbort = (): void => {
-			closeSession(entry.senpiSessionId, "resume_initialization_aborted");
-			reject(new Error("Claude SDK OAuth reattach aborted"));
-		};
-		if (signal.aborted) onAbort();
-		else signal.addEventListener("abort", onAbort, { once: true });
+	let rejectAborted: (reason?: unknown) => void = () => {};
+	const aborted = new Promise<never>((_, reject) => {
+		rejectAborted = reject;
 	});
-	await Promise.race([initialize.call(entry.query), aborted]);
+	const onAbort = (): void => {
+		closeSession(entry.senpiSessionId, "resume_initialization_aborted");
+		rejectAborted(new Error("Claude SDK OAuth reattach aborted"));
+	};
+	if (signal.aborted) {
+		onAbort();
+	} else {
+		signal.addEventListener("abort", onAbort, { once: true });
+	}
+	try {
+		await Promise.race([initialize.call(entry.query), aborted]);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
 }
 
 /**

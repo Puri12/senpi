@@ -6,8 +6,8 @@ Build, validation, release, publish, lockfile, and environment tooling for the s
 
 All `.mjs` files carry `#!/usr/bin/env node` and run as ES modules; `devenv-setup.sh`/
 `.ps1` locate Node and delegate to `devenv-setup.mjs` (they own no logic). Colocated
-`*.test.mjs` run via root `bun run test:scripts`; root `preinstall` runs
-`create-bin-stubs.mjs`. `scripts/qa/` render assertions go through `xterm-render.mjs`'s
+`*.test.mjs` run via root `bun run test:scripts` (shared fixtures live in `*.test-support.mjs`,
+outside that glob); root `preinstall` runs `create-bin-stubs.mjs`. `scripts/qa/` render assertions go through `xterm-render.mjs`'s
 cell grid. Prefixes encode role:
 
 | Prefix | Role |
@@ -18,8 +18,23 @@ cell grid. Prefixes encode role:
 
 ## Key entry points
 
-- `build-all.mjs`: PM-agnostic build orchestrator. Detects npm/Bun/pnpm via `npm_execpath`
-  and `npm_config_user_agent`; strips pnpm-only `npm_config_*` env keys before spawning.
+- `package-manager.mjs`: shared npm/Bun/pnpm plumbing — detection (`npm_config_user_agent`, then
+  the `npm_execpath` basename), pnpm-only `npm_config_*` scrubbing, execpath-aware spawning that
+  forwards SIGINT/SIGTERM/SIGHUP to the child, and per-manager forwarded-argument shaping.
+- `build-all.mjs`: PM-agnostic build orchestrator in dependency phases, built on `package-manager.mjs`.
+- `build-coding-agent-bundle.mjs`: esbuild release bundle of the compiled coding-agent (and the
+  `packages/ai` lazy loaders it reaches). `packages/coding-agent`'s `build:bundle` script runs it as
+  the last step of that package's `build`, so every root build emits
+  `packages/coding-agent/dist/bundle/` — the tree both `bin.pi` and `bin.senpi` resolve to and the
+  npm tarball ships. The unbundled `dist/` tree is still published for library consumers, the RPC
+  supervisor re-entry and this directory's profiler. It consumes compiled `dist/` output from
+  `packages/ai` and `packages/coding-agent`, so it runs after those builds, never before them.
+  `node-bundle-smoke.test.ts` rebuilds it and runs the bundled CLI under both Node and Bun.
+- `run-workspaces.mjs`: root -> workspace script runner
+  (`node scripts/run-workspaces.mjs [--if-present] [--workspace <name|path>]... <script> [-- <args>]`):
+  resolves the root `workspaces` field, runs `<pm> run <script>` per workspace sequentially in path
+  order with the invoking manager, never re-enters the root, and prints a PASS / SKIP / FAIL summary.
+  Every root `package.json` delegation into a workspace goes through it (`root-workspace-scripts.test.mjs`).
 - `release.mjs`: CalVer release composing `calver.mjs` and
   `release-{packages,artifacts,changelog,git,test-gate}.mjs`. Preflight: on `main`, clean tree
   (dry-run warns), valid CalVer; `--dry-run` previews every command and file write.
@@ -38,6 +53,20 @@ cell grid. Prefixes encode role:
   `check-ts-relative-imports.mjs`, `check-browser-smoke.mjs`, `diff-model-catalog.mjs`,
   `publish-model-catalog.mjs`, `generate-thinking-capabilities.mjs` — `bun run check` chains them.
 
+## Release entry graph validation
+
+After a lifecycle-disabled install, run `npm rebuild canvas --foreground-scripts`
+(as the release builder does) to provide its native binding. Then run
+`bun test scripts/release-graph-codemode.test.ts` followed by
+`bun test scripts/release-graph-exclusions.test.ts`. The codemode suite rebuilds
+all workspace entries and prepares compile assets before measuring real Bun output
+contributions, so direct invocation also replaces stale `dist` from another branch.
+The CI `Test (workspaces + scripts)` job runs these commands in its
+`Fresh release entry graphs (codemode and exclusions)` step, before either script
+suite can invalidate generated output. These Bun `.ts` tests are not part of the
+Node `.mjs` script-test glob. Run them only in a checkout whose generated outputs
+you can rebuild; no source or package manifest is rewritten by this gate.
+
 ## changes.md tracker
 
 `scripts/changes.md` is the hand-written change tracker feeding CHANGELOG gates.
@@ -53,8 +82,13 @@ parse `## YYYY-MM-DD` and `## Title (YYYY-MM-DD)` dialects.
 Embeds workspace packages in the published `@code-yeongyu/senpi` tarball. `sourceOnly: false`
 ships `dist/index.js` (build before staging); `sourceOnly: true` ships `src/` (only
 `senpi-codemode`). Every `requiredFiles` entry is validated; `@earendil-works/pi-pty` also
-requires `native/index.js` and a platform prebuild. The tarball is fully self-contained: `copyPublishDependencies` stages the ENTIRE runtime
-closure from `publish-deps.lock.json` into `packages/coding-agent/node_modules`, and
+requires `native/index.js` and a platform prebuild. The tarball is fully self-contained: `copyPublishDependencies` (delegating to
+`prepare-senpi-publish-dependencies.mjs`) stages the ENTIRE runtime closure from
+`publish-deps.lock.json` into `packages/coding-agent/node_modules` so the staged tree mirrors that
+manifest exactly — nested entries included, npm's workspace-local placements at the top level with a
+conflicting root copy re-nested under its dependents (`prepare-senpi-publish-placements.mjs`),
+version-matched against the installed copy, unlisted leftovers pruned — regardless of how the
+developer's package manager hoisted `node_modules`, and
 `stagePublishManifest` rewrites `bundleDependencies` to every platform-portable staged
 package while original `dependencies` keys stay intact, pointing through npm aliases to
 fork-owned `@code-yeongyu/senpi-*` packages (npm packs original import paths; Bun resolves
@@ -63,7 +97,9 @@ Staging dirties `packages/coding-agent/package.json`; restore with `git checkout
 
 ## Anti-patterns
 
-- Don't hardcode `npm` as the child process manager. Use the detected PM from `build-all.mjs`.
+- Don't hardcode `npm` as the child process manager. Use the detected PM from `package-manager.mjs`,
+  and reach workspaces from root scripts only through `run-workspaces.mjs` — never
+  `npm run --workspaces`, `npm --workspace=<name> run`, `npm --prefix <dir> run`, or `cd <dir> && npm run`.
 - Never hand-edit `publish-deps.lock.json` or `coding-agent-install-lock.json`; regenerate
   with the `generate-*` scripts.
 - Never run `bun scripts/publish.mjs` without a prior build; it checks `dist/` exists, not

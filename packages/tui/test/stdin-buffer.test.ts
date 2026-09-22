@@ -6,6 +6,7 @@
  */
 
 import assert from "node:assert";
+import { once } from "node:events";
 import { beforeEach as nodeBeforeEach, describe as nodeDescribe, it as nodeIt } from "node:test";
 import { beforeEach as vitestBeforeEach, describe as vitestDescribe, it as vitestIt } from "vitest";
 import { matchesKey } from "../src/keys.ts";
@@ -153,14 +154,11 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(emittedSequences, ["\x1b[<35;20;5m"]);
 		});
 
-		it("should flush incomplete sequence after timeout", async () => {
-			processInput("\x1b[<35");
+		it("should flush an unowned incomplete CSI after timeout", async () => {
+			const emitted = once(buffer, "data", { signal: AbortSignal.timeout(1000) });
+			processInput("\x1b[35");
 			assert.deepStrictEqual(emittedSequences, []);
-
-			// Wait for timeout
-			await wait(15);
-
-			assert.deepStrictEqual(emittedSequences, ["\x1b[<35"]);
+			assert.deepStrictEqual(await emitted, ["\x1b[35"]);
 		});
 
 		it("should flush a lone ESC as Escape when CR arrives after the timeout", async () => {
@@ -451,11 +449,12 @@ describe("StdinBuffer", () => {
 	});
 
 	describe("Flush", () => {
-		it("should flush incomplete sequences", () => {
+		it("should retain owned mouse fragments on explicit flush (#1645)", () => {
 			processInput("\x1b[<35");
-			const flushed = buffer.flush();
-			assert.deepStrictEqual(flushed, ["\x1b[<35"]);
-			assert.strictEqual(buffer.getBuffer(), "");
+			assert.deepStrictEqual(buffer.flush(), []);
+			assert.strictEqual(buffer.getBuffer(), "\x1b[<35");
+			processInput(";20;5M");
+			assert.deepStrictEqual(emittedSequences, ["\x1b[<35;20;5M"]);
 		});
 
 		it("should return empty array if nothing to flush", () => {
@@ -463,14 +462,11 @@ describe("StdinBuffer", () => {
 			assert.deepStrictEqual(flushed, []);
 		});
 
-		it("should emit flushed data via timeout", async () => {
-			processInput("\x1b[<35");
+		it("should emit unowned flushed data via timeout", async () => {
+			const emitted = once(buffer, "data", { signal: AbortSignal.timeout(1000) });
+			processInput("\x1b[35");
 			assert.deepStrictEqual(emittedSequences, []);
-
-			// Wait for timeout to flush
-			await wait(15);
-
-			assert.deepStrictEqual(emittedSequences, ["\x1b[<35"]);
+			assert.deepStrictEqual(await emitted, ["\x1b[35"]);
 		});
 	});
 

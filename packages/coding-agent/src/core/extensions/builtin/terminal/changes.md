@@ -1,4 +1,123 @@
+## 2026-09-21 - Stop parked-session file polling (#1902)
+
+### What changed
+
+- `extension.ts` consumes retained-session parked/resumed events.
+- `monitor-registry.ts` pauses file-watch loops while parked, including watches registered by a detached turn, and resumes only watches not independently muted.
+
+### Why
+
+- The last socket disconnect did not stop the 250ms file-watch polls. Parking must not be persisted as a user mute or reset a monitor's wake budget.
+
+### Why an extension could not handle it
+
+- This builtin owns the live monitor registry and its polling loops.
+
+### Expected merge conflict zones
+
+- Terminal lifecycle subscriptions and monitor registration/check/resume paths.
+
+## 2026-09-17 - Load pi-pty on the first terminal session (senpi#1781)
+
+### What changed
+
+- New `pty.lazy.ts` owns the single deferred `import("@earendil-works/pi-pty")`; `manager.ts` and `runtime-session.ts` keep type-only pi-pty imports.
+- `TerminalManager.create` awaits `loadPty()` before constructing the session registry and the runtime session; the constructor no longer builds a registry, and the synchronous get/list/stop/teardown/reserve paths treat an unloaded registry as empty.
+- `SessionRegistryCapacityError` is re-exported as a type; `isCapacityError` matches `instanceof` against the loaded class and falls back to the error name before pi-pty has loaded.
+- `runtime-session.ts` top-level-awaits `loadPty()` so its synchronous constructor still works, and `manager.ts` dynamic-imports it so that await never joins the engine startup graph.
+
+### Why
+
+- pi-pty's `dist/screen.js` imports `@xterm/headless` at module evaluation, whose initialization spent about 458ms in `RegExp.prototype.test` on every CLI boot even when no terminal session was ever created.
+
+### Why an extension could not handle it
+
+- The terminal builtin is the in-tree owner of the PTY session graph; an outside extension cannot change its static imports.
+
+### Expected merge conflict zones
+
+- MEDIUM: the `manager.ts` constructor, `create`, `isCapacityError` and the capacity-error re-export.
+- LOW: `runtime-session.ts` constructor imports.
+
+## 2026-09-15 - Monitor bounds: paused watch zero-poll, capped line buffer (#1698)
+
+### What changed
+
+- `monitor-registry.ts` delegates to three extracted units: `monitor-line-buffer.ts` (tail capped at 64KiB), `monitor-file-watch.ts` (poll timer cleared while paused, immediate check on resume), and `monitor-file-digest.ts` (the sampled SHA-256 digest, moved unchanged).
+- A paused file monitor now does zero stat/digest work (its 250ms timer is cleared, not just ignored); resume runs one immediate check, preserving the deferred-fire semantics for changes made during the pause.
+
+### Why
+
+- A paused monitor still polled and digested its file every 250ms, and a newline-less output stream grew the session monitor's retained line tail without bound — both measured as idle-session CPU and memory growth.
+
+### Why an extension could not handle it
+
+- The poll scheduling and line buffering are internal to the monitor registry; extensions see only the public pause/resume API.
+
+### Expected merge conflict zones
+
+- LOW: `monitor-registry.ts` record fields (`poll` -> `watch`, `lineBuffer` string -> `MonitorLineBuffer`), pause/resume bodies, `#consume`. Public API and event payloads unchanged.
+
 # terminal builtin extension — fork surface
+
+## Replacement bash preserves declared eval exposure (2026-09-14, #1678)
+
+### What changed
+
+- `packages/coding-agent/src/core/extensions/builtin/terminal/tools/bash.ts` declares `exposure: "eval"` on the PTY-backed bash replacement, matching the core bash definition.
+
+### Why
+
+- `packages/coding-agent/src/core/extensions/builtin/terminal/tools/bash.ts` replaces the core definition in normal SDK/CLI sessions. Without its own declaration, removing bash from the fixed eval-only set unintentionally exposes the replacement directly to the model.
+
+### Why an extension could not handle it
+
+- `packages/coding-agent/src/core/extensions/builtin/terminal/tools/bash.ts` owns this builtin replacement's definition. The declaration belongs on that definition, not in another name-based policy exception.
+
+### Expected merge conflict zones
+
+- `packages/coding-agent/src/core/extensions/builtin/terminal/tools/bash.ts`: the definition returned by createPtyBashTool. Spawn, path and process handling are unchanged.
+
+## Foreground git commands stay non-interactive (2026-09-08)
+
+### What changed
+
+- `shared.ts`: `FOREGROUND_ENV_OVERRIDES` gains two keys. `GIT_EDITOR: "true"` makes git spawn `/usr/bin/true` as the editor for foreground one-shot commands — git treats a zero-exit editor as accepted, so a `git commit` without `-m` aborts with `Aborting commit due to empty commit message` and a `git rebase -i` takes the todo list as-is instead of parking the captured PTY inside nvim on COMMIT_EDITMSG. `GIT_TERMINAL_PROMPT: "0"` makes git fail fast on credential prompts (exit 128, `could not read Username`) — the same opt-out `package-manager.ts` uses for its own git calls. Background PTY sessions still spawn with only `sessionEnvOverrides` (`runBackground` in `tools/bash.ts`), so interactive git in a background session keeps the user's real settings.
+
+### Why
+
+- Child agents and foreground one-shot commands run with a captured PTY: when git opens an editor or asks for credentials on that terminal nobody can type, and the tool blocks until the timeout kills the command. The existing foreground overrides already removed color/pager interactivity; the editor and credential prompts were the two remaining terminal-input paths.
+
+### Why an extension could not handle it
+
+- The overrides are injected by this builtin's own `runForeground` spawn path from its shared constants; an outside extension cannot alter the environment of a PTY the terminal manager spawns.
+
+### Expected merge conflict zones
+
+- LOW: the `FOREGROUND_ENV_OVERRIDES` constant and its doc comment in `shared.ts`, plus the foreground/background env assertions in `test/terminal-bash-tool-output.test.ts`.
+
+## File monitors resolve parent identity without realpath and gate `fs.watch` behind a bounded open (2026-09-07)
+
+### What changed
+
+- `monitor-registry.ts`: the five `fs.promises.realpath` calls (approved parent at registration, target identity after open, activation parent before `watch`, and both re-checks in `#checkFileImpl`) now use `realpathWithoutOpen` from `src/utils/paths.ts` — the lstat/readlink walker the permission parser uses for the approved parent, so both sides compute the same string by construction.
+- Immediately before the synchronous `fs.watch(parent)`, registration awaits `probeDirectoryOpenable(parent)` (`src/utils/fs-watch.ts`: `opendir` + one `read` + `close`) through `#registrationAwait`, so a directory whose open never returns fails the registration at `timeoutMs` instead of blocking the host main thread inside `watch()`.
+- The watch target goes through `canonicalWatchPath` (`src/utils/fs-watch.ts`), which resolves `realpathSync.native` on Windows only; that keeps the issue #1229 guarantee (libuv aborts on a non-canonical 8.3 directory watch) without touching realpath on POSIX.
+
+### Why
+
+- Bun implements every `fs.realpath*` by `open(2)`-ing each directory. On a macOS host whose autofs automounter is wedged, `realpath("/home")` never returns: on the permission parser's main-thread call that froze the TUI (#1416 follow-up), and in the registry it parked a pool thread until the deadline. With the parser no longer opening anything, the registry had to switch too — Bun's realpath canonicalises case, the walker preserves it, and the TOCTOU checks compare the two strings for equality.
+- Removing realpath from the registry would otherwise have let a wedged parent reach `fs.watch`, which opens the directory synchronously on the main thread; the bounded `opendir` probe restores the deadline that the async realpath used to provide.
+
+### Why an extension could not handle it
+
+- The registry and the permission parser are both fork builtins; the approved-parent handshake between them is internal.
+
+### Expected merge conflict zones
+
+- `monitor-registry.ts` imports, `registerFile` (parent identity, target identity, activation + `watch`), `#checkFileImpl` re-checks.
+- `src/utils/fs-watch.ts` (`canonicalWatchPath`, `probeDirectoryOpenable`; `watchWithErrorHandler` now delegates its win32 canonicalisation).
+- `test/suite/terminal-monitor-parent-resolution.test.ts` (new: registration with realpath rejecting, deadline on a non-openable parent, parser/registry symlink agreement, swapped-parent rejection).
 
 ## `persistent` reads as the standing-watch switch (2026-09-04)
 
@@ -989,3 +1108,24 @@ lifecycle code, the N-API `startPtySession` callback, and terminal runtime const
 - Regression coverage: `test/terminal-bash-abort.test.ts` (pre-aborted signal spawns nothing, SIGTERM-ignoring
   command, PTY held open across abort and timeout, plain-run pin) and `packages/pty/test/registry.test.ts`
   (bounded stop/teardown on a session that never reports exit).
+
+## Monitor telemetry over extension events (2026-09-08)
+
+### What changed
+
+- `monitor-registry.ts`: live monitor snapshots now carry command/filter/persistence/deadline and fire counters, and each monitor emits one typed ended record with its terminal reason and exit code.
+- `extension.ts` and `session-bundle.ts`: publish enriched state and `terminal_monitor_ended` through the existing extension and RPC event channels; replay endings across a parked reload exactly once. Fire-stat refreshes do not trigger manifest writes or wake-source transitions.
+- `monitor-notify.ts`, `notify.ts`, and `tools/monitor.ts`: retain monitor details in coalesced `senpi-monitor:notification` custom-message entries, including overflow-only monitors, and capture registration metadata without changing the monitor schema or description. `details` is already accepted and persisted by the custom-message API, so no fallback event or content prefix is needed.
+- `durable-command.ts` and `durable-file.ts`: retain command/persistence metadata after restart. `fireCount` counts emitted line and summary events in this registry lifetime, including the final summary; paused/filtered lines are excluded. Existing persistent file-watch lifetime semantics are unchanged.
+
+### Why
+
+- omo-desktop needs complete monitor records, lifecycle history, and monitor ids on each coalesced notification to render runtime details and timeline joins.
+
+### Why an extension could not handle it
+
+- The registry owns monitor lifecycle, fire accounting, and terminal exit classification; the builtin terminal extension is the existing event publisher and notification owner.
+
+### Expected merge conflict zones
+
+- MEDIUM: `monitor-registry.ts` lifecycle and snapshot paths; LOW: `extension.ts`, `session-bundle.ts`, `durable-command.ts`, `durable-file.ts`, `monitor-notify.ts`, `notify.ts`, and `tools/monitor.ts`.

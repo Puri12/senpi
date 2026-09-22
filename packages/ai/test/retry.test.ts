@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { fauxAssistantMessage } from "../src/providers/faux.ts";
 import {
+	EMPTY_RESPONSE_ERROR,
+	EMPTY_TOOL_USE_ERROR,
+	FORWARDED_EMPTY_RESPONSE_ERROR,
+	FORWARDED_EMPTY_TOOL_USE_ERROR,
+} from "../src/utils/empty-response-errors.ts";
+import {
 	isProviderStreamStallError,
 	isProviderTimeoutError,
 	isRetryableAssistantError,
@@ -40,18 +46,13 @@ const nonCanonicalModelRequestRejectionMessages = [
 
 describe("provider retry classification", () => {
 	it("applies bounded injectable Codex-style jitter", () => {
-		expect(retryDelayMs(1_000, 1, () => 0)).toBe(900);
-		expect(retryDelayMs(1_000, 1, () => 1)).toBe(1_100);
+		expect(retryDelayMs({ baseDelayMs: 1_000, random: () => 0 }, 1)).toBe(900);
+		expect(retryDelayMs({ baseDelayMs: 1_000, random: () => 1 }, 1)).toBe(1_100);
 	});
 
 	it("keeps provider retry hints above the jittered schedule", () => {
 		const hinted = 1_050;
-		expect(
-			Math.max(
-				hinted,
-				retryDelayMs(1_000, 1, () => 0),
-			),
-		).toBe(hinted);
+		expect(Math.max(hinted, retryDelayMs({ baseDelayMs: 1_000, random: () => 0 }, 1))).toBe(hinted);
 	});
 	it("matches explicit provider retry guidance", () => {
 		expect(
@@ -122,6 +123,14 @@ describe("provider retry classification", () => {
 		).toBe(true);
 		expect(
 			isRetryableAssistantError(
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "WebSocket liveness timeout after 70000ms (2 pings unanswered)",
+				}),
+			),
+		).toBe(true);
+		expect(
+			isRetryableAssistantError(
 				fauxAssistantMessage("", { stopReason: "error", errorMessage: "Provider stream never started" }),
 			),
 		).toBe(false);
@@ -136,6 +145,8 @@ describe("provider retry classification", () => {
 			true,
 		],
 		["Idle timeout waiting for provider stream after 5ms (x)", false, false],
+		["WebSocket liveness timeout after 70000ms (2 pings unanswered)", true, true],
+		["WebSocket liveness timeout after 70000ms (2 pings unanswered) extra", false, false],
 		["Request timed out.", false, true],
 		["Request timed out", false, true],
 		["Command timed out after 30000ms", false, false],
@@ -261,6 +272,17 @@ describe("provider retry classification", () => {
 		).toBe(true);
 	});
 
+	it("matches Claude Agent SDK session lock contention", () => {
+		expect(
+			isRetryableAssistantError(
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					errorMessage: "Lock file is already being held",
+				}),
+			),
+		).toBe(true);
+	});
+
 	it("matches upstream request buffer exhaustion wording", () => {
 		expect(
 			isRetryableAssistantError(
@@ -298,6 +320,24 @@ describe("provider retry classification", () => {
 				fauxAssistantMessage("", { stopReason: "error", errorMessage: anthropicOrphanServerToolMessage }),
 			),
 		).toBe(true);
+	});
+
+	it("retries an empty outcome only when its reasoning was already forwarded live", () => {
+		// A forwarded attempt cannot be replayed inside the stream wrapper (a second `start`
+		// would duplicate the partial), so the turn retry owns it; the bounded "twice" errors
+		// already spent the wrapper's own retry and stay terminal.
+		for (const errorMessage of [FORWARDED_EMPTY_RESPONSE_ERROR, FORWARDED_EMPTY_TOOL_USE_ERROR]) {
+			expect(
+				isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage })),
+				errorMessage,
+			).toBe(true);
+		}
+		for (const errorMessage of [EMPTY_RESPONSE_ERROR, EMPTY_TOOL_USE_ERROR]) {
+			expect(
+				isRetryableAssistantError(fauxAssistantMessage("", { stopReason: "error", errorMessage })),
+				errorMessage,
+			).toBe(false);
+		}
 	});
 
 	it("keeps unrelated invalid_request errors non-retryable", () => {
@@ -426,6 +466,28 @@ describe("provider retry classification", () => {
 	});
 });
 
+describe("retryDelayMs", () => {
+	it("caps agent retry delay", () => {
+		// Regression for #8826. The fork jitters the scheduled delay by +/-10% before the
+		// cap applies, so the jitter source is pinned here instead of relying on the exact
+		// unjittered product upstream asserts.
+		expect(retryDelayMs({ baseDelayMs: 2000, random: () => 1 }, 6)).toBe(60000);
+		expect(retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 5000, random: () => 1 }, 5)).toBe(5000);
+		expect(retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 0, random: () => 1 }, 5)).toBe(0);
+	});
+
+	it("clamps an exponentially overflowed delay to the cap", () => {
+		expect(retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 60000, random: () => 1 }, 20)).toBe(60000);
+		expect(retryDelayMs({ baseDelayMs: 2000, maxAgentDelayMs: 60000, random: () => 0 }, 2000)).toBe(60000);
+	});
+
+	it("never exceeds the default cap for any jitter sample", () => {
+		for (const sample of [0, 0.25, 0.5, 0.75, 1]) {
+			expect(retryDelayMs({ baseDelayMs: 2000, random: () => sample }, 8)).toBe(60000);
+		}
+	});
+});
+
 describe("retryAssistantCall", () => {
 	const disabled: RetryPolicy = { enabled: false, maxRetries: 3, baseDelayMs: 0 };
 	const enabled: RetryPolicy = { enabled: true, maxRetries: 3, baseDelayMs: 0 };
@@ -468,6 +530,32 @@ describe("retryAssistantCall", () => {
 		expect(produce).toHaveBeenCalledTimes(4); // 1 initial + 3 retries
 		expect(onRetryScheduled).toHaveBeenCalledTimes(3);
 		expect(onRetryFinished).toHaveBeenCalledWith(false, 3, "terminated");
+	});
+
+	it("reports capped retry delays", async () => {
+		// Regression for #8826. The fork jitters the scheduled delay by +/-10% before
+		// the cap applies, so pin the jitter source to its neutral midpoint
+		// (multiplier exactly 1.0) instead of letting Math.random perturb the
+		// schedule: without this the first reported delay is 9, 10, or 11 by luck.
+		const policy: RetryPolicy = {
+			enabled: true,
+			maxRetries: 4,
+			baseDelayMs: 10,
+			maxAgentDelayMs: 15,
+			random: () => 0.5,
+		};
+		let n = 0;
+		const produce = vi.fn(async () => {
+			n++;
+			return n < 5
+				? fauxAssistantMessage("", { stopReason: "error", errorMessage: "terminated" })
+				: fauxAssistantMessage("recovered");
+		});
+		const onRetryScheduled = vi.fn();
+
+		await retryAssistantCall(produce, policy, undefined, { onRetryScheduled });
+
+		expect(onRetryScheduled.mock.calls.map((call) => call[2])).toEqual([10, 15, 15, 15]);
 	});
 
 	it("stops retrying once a call succeeds", async () => {
